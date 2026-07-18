@@ -16,16 +16,23 @@ xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 xcb = dependency('xcb')
 
-# wlroots' pkg-config file name has historically been versioned
-# (e.g. wlroots-0.18.pc). Try the versioned name first and fall back
-# to the plain 'wlroots' name used by some distros/overlays.
-wlroots = dependency('wlroots-0.18', required: false)
-if not wlroots.found()
-  wlroots = dependency('wlroots-0.19', required: false)
+# wlroots' pkg-config file name is versioned (e.g. wlroots-0.18.pc,
+# wlroots-0.19.pc, ...) and the suffix changes with every wlroots major
+# release, so hardcoding a version here goes stale quickly. Instead, ask
+# pkg-config what's actually installed and use that name verbatim.
+pkgconfig_bin = find_program('pkg-config')
+wlroots_name = 'wlroots'
+list_result = run_command(pkgconfig_bin, '--list-all', check: false)
+if list_result.returncode() == 0
+  foreach line : list_result.stdout().strip().split('\n')
+    fields = line.strip().split(' ')
+    if fields.length() > 0 and fields[0].startswith('wlroots')
+      wlroots_name = fields[0]
+    endif
+  endforeach
 endif
-if not wlroots.found()
-  wlroots = dependency('wlroots', required: true)
-endif
+message('using wlroots pkg-config name: ' + wlroots_name)
+wlroots = dependency(wlroots_name, required: true)
 
 executable(
   'wc-x11',
