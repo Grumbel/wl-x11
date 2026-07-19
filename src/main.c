@@ -107,6 +107,7 @@ struct wc_server {
 	struct wl_listener request_set_selection;
 
 	struct wl_list windows; /* wc_window::link */
+	struct wc_window *focused_window;
 
 	/* Auxiliary connection used only to set WM_NAME / WM_CLASS on the
 	 * X11 windows that the wlroots X11 backend creates for us. */
@@ -325,11 +326,11 @@ static struct wc_window *window_from_xwin(struct wc_server *server, xcb_window_t
 	return NULL;
 }
 
-static void select_resize_events(struct wc_server *server, xcb_window_t w) {
+static void select_window_events(struct wc_server *server, xcb_window_t w) {
 	if (!server->xcb || xcb_connection_has_error(server->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
-	uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
 	xcb_change_window_attributes(server->xcb, w, XCB_CW_EVENT_MASK, &mask);
 	xcb_flush(server->xcb);
 }
@@ -358,6 +359,33 @@ static void apply_x11_resize(struct wc_window *win, int width, int height) {
 	wlr_output_state_finish(&state);
 }
 
+/* Drive both the xdg_toplevel ACTIVATED state (which is what clients like
+ * weston-terminal read to decide e.g. solid vs. hollow cursor block) and
+ * wl_seat keyboard focus from the host WM's real X11 focus, rather than
+ * from our own pointer-hover heuristics. This keeps "this window is
+ * focused" meaning the same thing at the X11 level and the Wayland level. */
+static void set_active_window(struct wc_server *server, struct wc_window *win) {
+	if (server->focused_window == win) {
+		return;
+	}
+
+	if (server->focused_window && server->focused_window->toplevel) {
+		wlr_xdg_toplevel_set_activated(server->focused_window->toplevel, false);
+	}
+
+	server->focused_window = win;
+
+	if (win && win->toplevel) {
+		wlr_xdg_toplevel_set_activated(win->toplevel, true);
+		struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
+		wlr_seat_keyboard_notify_enter(server->seat, win->toplevel->base->surface,
+			kb ? kb->keycodes : NULL, kb ? kb->num_keycodes : 0,
+			kb ? &kb->modifiers : NULL);
+	} else {
+		wlr_seat_keyboard_notify_clear_focus(server->seat);
+	}
+}
+
 static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	(void)fd;
 	(void)mask;
@@ -371,6 +399,19 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			struct wc_window *win = window_from_xwin(server, cn->window);
 			if (win) {
 				apply_x11_resize(win, cn->width, cn->height);
+			}
+		} else if (type == XCB_FOCUS_IN) {
+			xcb_focus_in_event_t *fi = (xcb_focus_in_event_t *)event;
+			struct wc_window *win = window_from_xwin(server, fi->event);
+			if (win) {
+				wlr_log(WLR_INFO, "X11 FocusIn on window 0x%x", fi->event);
+				set_active_window(server, win);
+			}
+		} else if (type == XCB_FOCUS_OUT) {
+			xcb_focus_out_event_t *fo = (xcb_focus_out_event_t *)event;
+			if (server->focused_window && server->focused_window->xwin == fo->event) {
+				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x", fo->event);
+				set_active_window(server, NULL);
 			}
 		}
 		free(event);
@@ -555,7 +596,7 @@ static void create_output_for_window(struct wc_window *win) {
 	if (win->xwin != XCB_WINDOW_NONE) {
 		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
 			win->xwin);
-		select_resize_events(server, win->xwin);
+		select_window_events(server, win->xwin);
 		xwin_set_default_cursor_recursive(server, win->xwin);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
@@ -634,6 +675,9 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	if (win->output) {
 		wlr_output_destroy(win->output);
 	}
+	if (win->server->focused_window == win) {
+		win->server->focused_window = NULL;
+	}
 
 	wl_list_remove(&win->map.link);
 	wl_list_remove(&win->unmap.link);
@@ -657,7 +701,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	win->scene_tree = wlr_scene_xdg_surface_create(&server->scene->tree,
 		toplevel->base);
 	win->scene_tree->node.data = win;
-	toplevel->base->data = win->scene_tree;
+	toplevel->base->data = win;
 
 	win->map.notify = xdg_toplevel_map;
 	wl_signal_add(&toplevel->base->surface->events.map, &win->map);
@@ -719,6 +763,14 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
 	process_cursor_motion(server, event->time_msec);
 }
 
+static struct wc_window *window_from_surface(struct wlr_surface *surface) {
+	struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface(surface);
+	if (!xdg_surface || xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
+		return NULL;
+	}
+	return xdg_surface->data;
+}
+
 static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wc_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
@@ -736,13 +788,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	/* Click-to-focus for keyboard input. */
-	struct wlr_keyboard *kb = wlr_seat_get_keyboard(server->seat);
-	if (kb) {
-		wlr_seat_keyboard_notify_enter(server->seat, surface,
-			kb->keycodes, kb->num_keycodes, &kb->modifiers);
-	} else {
-		wlr_seat_keyboard_notify_enter(server->seat, surface, NULL, 0, NULL);
+	/* Click-to-focus. In practice a click inside a window will usually
+	 * also cause the host WM to give it real X11 focus, generating a
+	 * FocusIn we'd handle anyway; this is a same-path fallback for that,
+	 * routed through set_active_window() so it can't drift out of sync
+	 * with the ACTIVATED/keyboard-focus state that drives. */
+	struct wc_window *win = window_from_surface(surface);
+	if (win) {
+		set_active_window(server, win);
 	}
 }
 
