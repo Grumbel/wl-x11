@@ -126,6 +126,8 @@ struct wc_window {
 	struct wlr_output *output;               /* NULL when unmapped */
 	struct wlr_output_layout_output *l_output;
 	struct wlr_scene_output *scene_output;
+	int last_output_width;
+	int last_output_height;
 
 	xcb_window_t xwin;
 	char last_title[256];
@@ -234,6 +236,69 @@ static void xwin_set_class(struct wc_server *s, xcb_window_t w, const char *app_
 /* Output (== one X11 window) lifecycle                                 */
 /* ------------------------------------------------------------------- */
 
+static struct wc_window *window_from_xwin(struct wc_server *server, xcb_window_t w) {
+	struct wc_window *win;
+	wl_list_for_each(win, &server->windows, link) {
+		if (win->xwin == w) {
+			return win;
+		}
+	}
+	return NULL;
+}
+
+static void select_resize_events(struct wc_server *server, xcb_window_t w) {
+	if (!server->xcb || xcb_connection_has_error(server->xcb) || w == XCB_WINDOW_NONE) {
+		return;
+	}
+	uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	xcb_change_window_attributes(server->xcb, w, XCB_CW_EVENT_MASK, &mask);
+	xcb_flush(server->xcb);
+}
+
+/* wlroots' X11 backend apparently doesn't keep wlr_output->width/height in
+ * sync with host-driven window resizes in the version this was tested
+ * against (its own events.commit never reflects the new size). So instead
+ * of trusting that, we watch ConfigureNotify ourselves via our auxiliary
+ * XCB connection and force the wlr_output to the observed size. This
+ * still goes through wlr_output_commit_state(), so it still fires
+ * events.commit and gets picked up by output_commit() below exactly like
+ * a "real" backend-driven resize would. */
+static void apply_x11_resize(struct wc_window *win, int width, int height) {
+	if (!win->output || width <= 0 || height <= 0) {
+		return;
+	}
+	if (width == win->last_output_width && height == win->last_output_height) {
+		return;
+	}
+	wlr_log(WLR_INFO, "observed X11 ConfigureNotify resize to %dx%d", width, height);
+
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_custom_mode(&state, width, height, 0);
+	wlr_output_commit_state(win->output, &state);
+	wlr_output_state_finish(&state);
+}
+
+static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
+	(void)fd;
+	(void)mask;
+	struct wc_server *server = data;
+
+	xcb_generic_event_t *event;
+	while ((event = xcb_poll_for_event(server->xcb)) != NULL) {
+		uint8_t type = event->response_type & ~0x80;
+		if (type == XCB_CONFIGURE_NOTIFY) {
+			xcb_configure_notify_event_t *cn = (xcb_configure_notify_event_t *)event;
+			struct wc_window *win = window_from_xwin(server, cn->window);
+			if (win) {
+				apply_x11_resize(win, cn->width, cn->height);
+			}
+		}
+		free(event);
+	}
+	return 0;
+}
+
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct wc_window *win = wl_container_of(listener, win, output_frame);
 	if (!win->scene_output) {
@@ -248,15 +313,25 @@ static void output_frame(struct wl_listener *listener, void *data) {
 
 static void output_commit(struct wl_listener *listener, void *data) {
 	struct wc_window *win = wl_container_of(listener, win, output_commit);
-	struct wlr_output_event_commit *event = data;
+	(void)data;
 
-	if (!(event->state->committed & WLR_OUTPUT_STATE_MODE)) {
-		return;
-	}
+	wlr_log(WLR_INFO, "output commit event (current size %dx%d, last known %dx%d)",
+		win->output->width, win->output->height,
+		win->last_output_width, win->last_output_height);
 
 	int w = win->output->width;
 	int h = win->output->height;
-	if (w > 0 && h > 0 && win->toplevel) {
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	if (w == win->last_output_width && h == win->last_output_height) {
+		return;
+	}
+	win->last_output_width = w;
+	win->last_output_height = h;
+
+	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
+	if (win->toplevel) {
 		wlr_xdg_toplevel_set_size(win->toplevel, w, h);
 	}
 }
@@ -337,6 +412,8 @@ static void create_output_for_window(struct wc_window *win) {
 
 	wlr_log(WLR_INFO, "new X11 output committed at %dx%d",
 		output->width, output->height);
+	win->last_output_width = output->width;
+	win->last_output_height = output->height;
 
 	/* Kick off the first frame explicitly; some backends (X11 included)
 	 * don't render anything until a frame is scheduled at least once. */
@@ -391,6 +468,7 @@ static void create_output_for_window(struct wc_window *win) {
 	if (win->xwin != XCB_WINDOW_NONE) {
 		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
 			win->xwin);
+		select_resize_events(server, win->xwin);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
@@ -775,6 +853,8 @@ int main(int argc, char **argv) {
 		server.xcb_root = xcb_setup_roots_iterator(setup).data->root;
 		server.atom_net_wm_name = intern_atom(server.xcb, "_NET_WM_NAME");
 		server.atom_utf8_string = intern_atom(server.xcb, "UTF8_STRING");
+		wl_event_loop_add_fd(loop, xcb_get_file_descriptor(server.xcb),
+			WL_EVENT_READABLE, handle_xcb_readable, &server);
 	}
 
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
