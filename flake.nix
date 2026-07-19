@@ -35,6 +35,7 @@
             libxkbcommon
             pixman
             libxcb
+            xcb-util-cursor
           ];
 
           meta = with pkgs.lib; {
@@ -65,6 +66,7 @@
             libxkbcommon
             pixman
             libxcb
+            xcb-util-cursor
           ];
 
           shellHook = ''

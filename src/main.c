@@ -74,6 +74,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <xcb/xcb.h>
+#include <xcb/xcb_cursor.h>
 
 /* ------------------------------------------------------------------- */
 /* Types                                                                 */
@@ -113,6 +114,7 @@ struct wc_server {
 	xcb_window_t xcb_root;
 	xcb_atom_t atom_net_wm_name;
 	xcb_atom_t atom_utf8_string;
+	xcb_cursor_t default_cursor;
 
 	struct wl_event_source *sigint_source;
 	struct wl_event_source *sigterm_source;
@@ -232,6 +234,83 @@ static void xwin_set_class(struct wc_server *s, xcb_window_t w, const char *app_
 	xcb_flush(s->xcb);
 }
 
+/* wlroots' X11 backend creates its windows with an invisible cursor by
+ * default -- it expects the nested Wayland compositor to render its own
+ * pointer image (e.g. from client-provided cursor surfaces). We don't
+ * implement that (out of scope for "minimal"), so instead we force a
+ * plain, always-visible arrow cursor at the X11 level on every window we
+ * create. This means cursor shape doesn't change contextually (no I-beam
+ * over text fields, no resize handles, etc.) but the pointer is always
+ * visible, which is the important part.
+ *
+ * We use xcb-cursor (the XCB equivalent of libXcursor) to load a real
+ * themed cursor. An earlier version of this used the legacy X core-font
+ * glyph cursor mechanism (xcb_open_font(..., "cursor")), which silently
+ * does nothing on modern X servers/distros that no longer ship that
+ * legacy bitmap font -- the cursor ID it produces doesn't actually exist,
+ * so every later attempt to apply it is quietly rejected by the server.
+ * xcb-cursor is the mechanism real window managers use and doesn't have
+ * that problem. */
+static xcb_cursor_t create_default_cursor(xcb_connection_t *c, xcb_screen_t *screen) {
+	if (!c || xcb_connection_has_error(c) || !screen) {
+		return 0;
+	}
+
+	xcb_cursor_context_t *ctx;
+	if (xcb_cursor_context_new(c, screen, &ctx) < 0) {
+		wlr_log(WLR_ERROR, "xcb_cursor_context_new failed; pointer will stay invisible");
+		return 0;
+	}
+
+	/* Try a couple of common names; themes disagree on which one exists. */
+	xcb_cursor_t cursor = xcb_cursor_load_cursor(ctx, "left_ptr");
+	if (cursor == 0) {
+		cursor = xcb_cursor_load_cursor(ctx, "default");
+	}
+	xcb_cursor_context_free(ctx);
+
+	if (cursor == 0) {
+		wlr_log(WLR_ERROR,
+			"xcb_cursor_load_cursor could not find \"left_ptr\" or \"default\" "
+			"in the current cursor theme; pointer will stay invisible");
+	} else {
+		wlr_log(WLR_INFO, "loaded default X11 cursor (xid 0x%x)", cursor);
+	}
+	return cursor;
+}
+
+static void xwin_set_default_cursor(struct wc_server *s, xcb_window_t w) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb) ||
+			w == XCB_WINDOW_NONE || s->default_cursor == 0) {
+		return;
+	}
+	uint32_t value = s->default_cursor;
+	xcb_change_window_attributes(s->xcb, w, XCB_CW_CURSOR, &value);
+	xcb_flush(s->xcb);
+}
+
+/* Many clients (particularly GL/EGL ones, which foot and weston-terminal
+ * both are) render into a child window distinct from the top-level window
+ * the WM manages -- the one we find via the root-children diff in
+ * create_output_for_window() is only that top-level window. X11 resolves
+ * the displayed cursor from the innermost window under the pointer,
+ * walking up to a parent only if the current window has no cursor of its
+ * own explicitly set; if wlroots set an invisible cursor specifically on
+ * such a child, our override on the parent alone would have no visible
+ * effect. So apply it recursively to the whole subtree instead. */
+static void xwin_set_default_cursor_recursive(struct wc_server *s, xcb_window_t w) {
+	xwin_set_default_cursor(s, w);
+	wlr_log(WLR_INFO, "applied default cursor to window 0x%x", w);
+
+	xcb_window_t *children = NULL;
+	int n = 0;
+	query_root_children(s->xcb, w, &children, &n);
+	for (int i = 0; i < n; i++) {
+		xwin_set_default_cursor_recursive(s, children[i]);
+	}
+	free(children);
+}
+
 /* ------------------------------------------------------------------- */
 /* Output (== one X11 window) lifecycle                                 */
 /* ------------------------------------------------------------------- */
@@ -305,6 +384,14 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		return;
 	}
 	wlr_scene_output_commit(win->scene_output, NULL);
+
+	/* wlroots' X11 backend appears to keep resetting the window's cursor
+	 * back to invisible on its own (a one-shot set right after window
+	 * creation didn't stick), so keep re-asserting a normal cursor every
+	 * frame. This is a cheap XChangeWindowAttributes call and is a
+	 * brute-force fix regardless of exactly when/why the backend resets
+	 * it. */
+	xwin_set_default_cursor(win->server, win->xwin);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -469,6 +556,7 @@ static void create_output_for_window(struct wc_window *win) {
 		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
 			win->xwin);
 		select_resize_events(server, win->xwin);
+		xwin_set_default_cursor_recursive(server, win->xwin);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
@@ -638,7 +726,7 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 		event->button, event->state);
 
-	if (event->state != WLR_BUTTON_PRESSED) {
+	if ((uint32_t)event->state != (uint32_t)WLR_BUTTON_PRESSED) {
 		return;
 	}
 
@@ -850,9 +938,11 @@ int main(int argc, char **argv) {
 			"will not be synced");
 	} else {
 		const xcb_setup_t *setup = xcb_get_setup(server.xcb);
-		server.xcb_root = xcb_setup_roots_iterator(setup).data->root;
+		xcb_screen_t *screen = xcb_setup_roots_iterator(setup).data;
+		server.xcb_root = screen->root;
 		server.atom_net_wm_name = intern_atom(server.xcb, "_NET_WM_NAME");
 		server.atom_utf8_string = intern_atom(server.xcb, "UTF8_STRING");
+		server.default_cursor = create_default_cursor(server.xcb, screen);
 		wl_event_loop_add_fd(loop, xcb_get_file_descriptor(server.xcb),
 			WL_EVENT_READABLE, handle_xcb_readable, &server);
 	}

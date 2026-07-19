@@ -9,12 +9,18 @@ project(
   ],
 )
 
+# wl_listener callbacks all take a `void *data` parameter dictated by
+# wlroots' signal API, even though many of our handlers don't need it --
+# that's expected, not a bug, so don't warn about it.
+add_project_arguments('-Wno-unused-parameter', language: 'c')
+
 add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
 
 wayland_server = dependency('wayland-server')
 xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 xcb = dependency('xcb')
+xcb_cursor = dependency('xcb-cursor')
 
 # wlroots' pkg-config file name is versioned (e.g. wlroots-0.18.pc,
 # wlroots-0.19.pc, ...) and the suffix changes with every wlroots major
@@ -37,6 +43,6 @@ wlroots = dependency(wlroots_name, required: true)
 executable(
   'wc-x11',
   'src/main.c',
-  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb],
+  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_cursor],
   install: true,
 )
