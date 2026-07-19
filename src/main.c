@@ -130,6 +130,7 @@ struct wc_window {
 	xcb_window_t xwin;
 	char last_title[256];
 	char last_app_id[256];
+	bool initial_configure_sent;
 
 	struct wl_listener map;
 	struct wl_listener unmap;
@@ -281,8 +282,15 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	win->xwin = XCB_WINDOW_NONE;
 }
 
+#define WC_DEFAULT_WIDTH 1024
+#define WC_DEFAULT_HEIGHT 720
+
 static void create_output_for_window(struct wc_window *win) {
 	struct wc_server *server = win->server;
+
+	wlr_log(WLR_INFO, "mapping toplevel \"%s\" (app_id \"%s\") to a new X11 window",
+		win->toplevel->title ? win->toplevel->title : "(no title)",
+		win->toplevel->app_id ? win->toplevel->app_id : "(no app_id)");
 
 	xcb_window_t *before = NULL;
 	int before_n = 0;
@@ -302,12 +310,37 @@ static void create_output_for_window(struct wc_window *win) {
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, true);
+
+	/* wlr_x11_output_create() does NOT pre-populate output->modes the way
+	 * DRM/KMS backends do -- X11 windows are arbitrarily resizable, so
+	 * there is no fixed mode list. If we don't explicitly set a mode
+	 * here, the output (and therefore the underlying X11 window) can end
+	 * up committed at its zero-initialized 0x0 size, which is why no
+	 * window would appear on screen. Always fall back to an explicit
+	 * custom mode when there's nothing in the preferred-mode list. */
 	struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
 	if (mode) {
+		wlr_log(WLR_INFO, "using preferred output mode %dx%d",
+			mode->width, mode->height);
 		wlr_output_state_set_mode(&state, mode);
+	} else {
+		wlr_log(WLR_INFO, "no preferred mode reported; using custom mode %dx%d",
+			WC_DEFAULT_WIDTH, WC_DEFAULT_HEIGHT);
+		wlr_output_state_set_custom_mode(&state, WC_DEFAULT_WIDTH,
+			WC_DEFAULT_HEIGHT, 0);
 	}
-	wlr_output_commit_state(output, &state);
+
+	if (!wlr_output_commit_state(output, &state)) {
+		wlr_log(WLR_ERROR, "failed to commit initial state for new X11 output");
+	}
 	wlr_output_state_finish(&state);
+
+	wlr_log(WLR_INFO, "new X11 output committed at %dx%d",
+		output->width, output->height);
+
+	/* Kick off the first frame explicitly; some backends (X11 included)
+	 * don't render anything until a frame is scheduled at least once. */
+	wlr_output_schedule_frame(output);
 
 	win->l_output = wlr_output_layout_add_auto(server->output_layout, output);
 	win->scene_output = wlr_scene_output_create(server->scene, output);
@@ -327,8 +360,8 @@ static void create_output_for_window(struct wc_window *win) {
 	win->output_commit.notify = output_commit;
 	wl_signal_add(&output->events.commit, &win->output_commit);
 
-	int w = output->width > 0 ? output->width : 1024;
-	int h = output->height > 0 ? output->height : 720;
+	int w = output->width > 0 ? output->width : WC_DEFAULT_WIDTH;
+	int h = output->height > 0 ? output->height : WC_DEFAULT_HEIGHT;
 	wlr_xdg_toplevel_set_size(win->toplevel, w, h);
 
 	/* Best-effort: find the xcb_window_t the backend just created so we
@@ -356,12 +389,17 @@ static void create_output_for_window(struct wc_window *win) {
 	free(after);
 
 	if (win->xwin != XCB_WINDOW_NONE) {
+		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
+			win->xwin);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
 			win->toplevel->title ? win->toplevel->title : "");
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s",
 			win->toplevel->app_id ? win->toplevel->app_id : "");
+	} else {
+		wlr_log(WLR_INFO, "could not resolve backing X11 window id "
+			"(title/class won't be synced, window should still be visible)");
 	}
 }
 
@@ -371,6 +409,7 @@ static void create_output_for_window(struct wc_window *win) {
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct wc_window *win = wl_container_of(listener, win, map);
+	wlr_log(WLR_INFO, "surface map event received");
 	if (win->output) {
 		return; /* already has a window (e.g. re-map) */
 	}
@@ -388,6 +427,25 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 
 static void surface_commit(struct wl_listener *listener, void *data) {
 	struct wc_window *win = wl_container_of(listener, win, commit);
+	wlr_log(WLR_INFO, "surface commit (mapped=%d, has_buffer=%d)",
+		win->output != NULL,
+		win->toplevel->base->surface->buffer != NULL);
+
+	/* The client cannot attach a buffer (and therefore cannot map) until
+	 * it has received and ack'd at least one xdg_surface.configure. By
+	 * the time this commit listener runs, wlroots' own xdg_surface
+	 * commit handling (registered before ours) has already marked the
+	 * surface "initialized", which is a precondition for scheduling a
+	 * configure -- doing this any earlier (e.g. right after get_toplevel)
+	 * trips an assertion inside wlroots. Send one with no explicit size,
+	 * which per the xdg-shell protocol tells the client it may pick its
+	 * own initial size; we resize it to match its new dedicated X11
+	 * window right after it maps. */
+	if (!win->initial_configure_sent) {
+		win->initial_configure_sent = true;
+		wlr_xdg_surface_schedule_configure(win->toplevel->base);
+	}
+
 	if (win->xwin == XCB_WINDOW_NONE || !win->toplevel) {
 		return;
 	}
@@ -422,6 +480,8 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	struct wc_server *server = wl_container_of(listener, server, new_xdg_toplevel);
 	struct wlr_xdg_toplevel *toplevel = data;
+
+	wlr_log(WLR_INFO, "new xdg_toplevel created (not yet mapped)");
 
 	struct wc_window *win = calloc(1, sizeof(*win));
 	win->server = server;
