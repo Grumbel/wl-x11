@@ -116,6 +116,21 @@ struct wc_server {
 	struct wl_list windows; /* wc_window::link */
 	struct wc_window *focused_window;
 
+	/* Self-driven interactive move/resize state. See begin_interactive_move()
+	 * and begin_interactive_resize() for why we don't delegate this to the
+	 * host WM via _NET_WM_MOVERESIZE: doing so put xfwm4's own interactive-
+	 * grab in direct conflict with our own input handling (both wanting
+	 * authority over the same live pointer stream), which manifested as an
+	 * X bell and no actual move/resize happening. Driving it ourselves
+	 * avoids that entirely, since we already see every motion event during
+	 * the drag directly. */
+	struct wc_window *move_win;
+	int move_win_x, move_win_y;             /* running real root position */
+
+	struct wc_window *resize_win;
+	uint32_t resize_edges;
+	int resize_win_x, resize_win_y, resize_win_w, resize_win_h; /* running */
+
 	/* Auxiliary connection used only to set WM_NAME / WM_CLASS on the
 	 * X11 windows that the wlroots X11 backend creates for us. */
 	xcb_connection_t *xcb;
@@ -144,14 +159,13 @@ struct wc_window {
 	struct wlr_scene_output *scene_output;
 	int last_output_width;
 	int last_output_height;
-	struct wl_event_source *resize_debounce_timer;
-	int pending_resize_width;
-	int pending_resize_height;
 
 	xcb_window_t xwin;
 #define WC_MAX_RELATED_WINDOWS 32
 	xcb_window_t related[WC_MAX_RELATED_WINDOWS];
 	int related_count;
+	xcb_window_t content_xwin; /* the real wlroots-owned window, distinct
+	                            * from xwin (the WM's decoration frame) */
 	char last_title[256];
 	char last_app_id[256];
 	bool initial_configure_sent;
@@ -170,6 +184,7 @@ struct wc_window {
 	struct wl_listener output_frame;
 	struct wl_listener output_destroy;
 	struct wl_listener output_commit;
+	struct wl_listener output_request_state;
 
 	struct wl_list link;
 };
@@ -329,18 +344,6 @@ static void xwin_set_default_cursor(struct wc_server *s, xcb_window_t w) {
 /* ------------------------------------------------------------------- */
 
 enum {
-	_NET_WM_MOVERESIZE_SIZE_TOPLEFT = 0,
-	_NET_WM_MOVERESIZE_SIZE_TOP = 1,
-	_NET_WM_MOVERESIZE_SIZE_TOPRIGHT = 2,
-	_NET_WM_MOVERESIZE_SIZE_RIGHT = 3,
-	_NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT = 4,
-	_NET_WM_MOVERESIZE_SIZE_BOTTOM = 5,
-	_NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT = 6,
-	_NET_WM_MOVERESIZE_SIZE_LEFT = 7,
-	_NET_WM_MOVERESIZE_MOVE = 8,
-};
-
-enum {
 	_NET_WM_STATE_REMOVE = 0,
 	_NET_WM_STATE_ADD = 1,
 };
@@ -388,79 +391,116 @@ static void send_net_wm_state(struct wc_server *s, xcb_window_t w,
 		1 /* source indication: normal application */, 0);
 }
 
-/* Real, host-server pointer position, decoupled from our internal
- * (purely bookkeeping) scene-layout cursor coordinates -- needed because
- * _NET_WM_MOVERESIZE wants root-window coordinates and our own wlr_cursor
- * doesn't live in that space. */
-static bool query_root_pointer(struct wc_server *s, int16_t *root_x, int16_t *root_y) {
-	if (!s->xcb || xcb_connection_has_error(s->xcb)) {
+/* EWMH/ICCCM window-management messages must target the real client
+ * window (content_xwin), not xfwm4's own decoration frame (xwin) -- see
+ * find_content_window() for why. Falls back to xwin if we failed to
+ * identify it, which will likely just be ignored by the WM but is
+ * better than sending nowhere. */
+static xcb_window_t ewmh_target_window(struct wc_window *win) {
+	return win->content_xwin != XCB_WINDOW_NONE ? win->content_xwin : win->xwin;
+}
+
+/* Real root-relative position of a window's origin, robust regardless of
+ * how deep it's nested (handles the WM's reparenting for us). */
+static bool query_window_root_position(struct wc_server *s, xcb_window_t w,
+		int16_t *x, int16_t *y) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return false;
 	}
-	xcb_query_pointer_cookie_t cookie = xcb_query_pointer(s->xcb, s->xcb_root);
-	xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply(s->xcb, cookie, NULL);
+	xcb_translate_coordinates_cookie_t cookie =
+		xcb_translate_coordinates(s->xcb, w, s->xcb_root, 0, 0);
+	xcb_translate_coordinates_reply_t *reply =
+		xcb_translate_coordinates_reply(s->xcb, cookie, NULL);
 	if (!reply) {
 		return false;
 	}
-	*root_x = reply->root_x;
-	*root_y = reply->root_y;
+	*x = reply->dst_x;
+	*y = reply->dst_y;
 	free(reply);
 	return true;
 }
 
-static uint32_t edges_to_moveresize_direction(uint32_t edges) {
-	bool top = edges & WLR_EDGE_TOP;
-	bool bottom = edges & WLR_EDGE_BOTTOM;
-	bool left = edges & WLR_EDGE_LEFT;
-	bool right = edges & WLR_EDGE_RIGHT;
+static bool query_window_geometry(struct wc_server *s, xcb_window_t w,
+		int *width, int *height) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
+		return false;
+	}
+	xcb_get_geometry_cookie_t cookie = xcb_get_geometry(s->xcb, w);
+	xcb_get_geometry_reply_t *reply = xcb_get_geometry_reply(s->xcb, cookie, NULL);
+	if (!reply) {
+		return false;
+	}
+	*width = reply->width;
+	*height = reply->height;
+	free(reply);
+	return true;
+}
 
-	if (top && left) return _NET_WM_MOVERESIZE_SIZE_TOPLEFT;
-	if (top && right) return _NET_WM_MOVERESIZE_SIZE_TOPRIGHT;
-	if (bottom && right) return _NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT;
-	if (bottom && left) return _NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT;
-	if (top) return _NET_WM_MOVERESIZE_SIZE_TOP;
-	if (bottom) return _NET_WM_MOVERESIZE_SIZE_BOTTOM;
-	if (left) return _NET_WM_MOVERESIZE_SIZE_LEFT;
-	if (right) return _NET_WM_MOVERESIZE_SIZE_RIGHT;
-	return _NET_WM_MOVERESIZE_MOVE;
+/* Sending _NET_WM_MOVERESIZE and letting xfwm4 drive an interactive move
+ * via its own pointer grab put it in direct conflict with our own input
+ * handling (both wanting the same live pointer stream), producing an
+ * X bell and no actual movement -- confirmed by testing. Instead, we
+ * track the drag ourselves using motion events we already receive (see
+ * process_cursor_motion()), and move the real X11 frame window (xwin)
+ * directly via xcb_configure_window as the pointer moves. This mirrors
+ * exactly what a manual host-WM border-drag already does successfully. */
+static void begin_interactive_move(struct wc_window *win) {
+	struct wc_server *server = win->server;
+	int16_t x, y;
+	if (win->xwin == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, win->xwin, &x, &y)) {
+		return;
+	}
+	server->move_win = win;
+	server->move_win_x = x;
+	server->move_win_y = y;
+	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
+		"0x%x at (%d,%d)", win->xwin, x, y);
+}
+
+static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
+	struct wc_server *server = win->server;
+	int16_t x, y;
+	int w, h;
+	if (win->xwin == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, win->xwin, &x, &y) ||
+			!query_window_geometry(server, win->xwin, &w, &h)) {
+		return;
+	}
+	server->resize_win = win;
+	server->resize_edges = edges;
+	server->resize_win_x = x;
+	server->resize_win_y = y;
+	server->resize_win_w = w;
+	server->resize_win_h = h;
+	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
+		"0x%x (edges 0x%x) at (%d,%d) %dx%d", win->xwin, edges, x, y, w, h);
 }
 
 static void toplevel_request_move(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct wc_window *win = wl_container_of(listener, win, request_move);
-	int16_t rx, ry;
-	if (win->xwin == XCB_WINDOW_NONE || !query_root_pointer(win->server, &rx, &ry)) {
-		return;
-	}
-	wlr_log(WLR_INFO, "toplevel requested move -> delegating to host WM");
-	send_root_client_message(win->server, win->xwin,
-		win->server->atom_net_wm_moveresize,
-		(uint32_t)rx, (uint32_t)ry, _NET_WM_MOVERESIZE_MOVE,
-		1 /* button: assume left */, 1 /* source: application */);
+	wlr_log(WLR_INFO, "toplevel requested move");
+	begin_interactive_move(win);
 }
 
 static void toplevel_request_resize(struct wl_listener *listener, void *data) {
 	struct wc_window *win = wl_container_of(listener, win, request_resize);
 	struct wlr_xdg_toplevel_resize_event *event = data;
-	int16_t rx, ry;
-	if (win->xwin == XCB_WINDOW_NONE || !query_root_pointer(win->server, &rx, &ry)) {
-		return;
-	}
-	uint32_t dir = edges_to_moveresize_direction(event->edges);
-	wlr_log(WLR_INFO, "toplevel requested resize (edges 0x%x) -> delegating to host WM",
-		event->edges);
-	send_root_client_message(win->server, win->xwin,
-		win->server->atom_net_wm_moveresize,
-		(uint32_t)rx, (uint32_t)ry, dir, 1, 1);
+	wlr_log(WLR_INFO, "toplevel requested resize (edges 0x%x)", event->edges);
+	begin_interactive_resize(win, event->edges);
 }
 
 static void toplevel_request_maximize(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct wc_window *win = wl_container_of(listener, win, request_maximize);
 	bool want = win->toplevel->requested.maximized;
+	xcb_window_t target = ewmh_target_window(win);
 
-	if (win->xwin != XCB_WINDOW_NONE) {
-		wlr_log(WLR_INFO, "toplevel requested maximized=%d -> delegating to host WM", want);
-		send_net_wm_state(win->server, win->xwin,
+	if (target != XCB_WINDOW_NONE) {
+		wlr_log(WLR_INFO, "toplevel requested maximized=%d -> delegating to "
+			"host WM (target 0x%x)", want, target);
+		send_net_wm_state(win->server, target,
 			want ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE,
 			win->server->atom_net_wm_state_maximized_vert,
 			win->server->atom_net_wm_state_maximized_horz);
@@ -494,10 +534,12 @@ static void toplevel_request_fullscreen(struct wl_listener *listener, void *data
 	(void)data;
 	struct wc_window *win = wl_container_of(listener, win, request_fullscreen);
 	bool want = win->toplevel->requested.fullscreen;
+	xcb_window_t target = ewmh_target_window(win);
 
-	if (win->xwin != XCB_WINDOW_NONE) {
-		wlr_log(WLR_INFO, "toplevel requested fullscreen=%d -> delegating to host WM", want);
-		send_net_wm_state(win->server, win->xwin,
+	if (target != XCB_WINDOW_NONE) {
+		wlr_log(WLR_INFO, "toplevel requested fullscreen=%d -> delegating "
+			"to host WM (target 0x%x)", want, target);
+		send_net_wm_state(win->server, target,
 			want ? _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE,
 			win->server->atom_net_wm_state_fullscreen, 0);
 	}
@@ -515,14 +557,16 @@ static void toplevel_request_fullscreen(struct wl_listener *listener, void *data
 static void toplevel_request_minimize(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct wc_window *win = wl_container_of(listener, win, request_minimize);
-	if (win->xwin == XCB_WINDOW_NONE) {
+	xcb_window_t target = ewmh_target_window(win);
+	if (target == XCB_WINDOW_NONE) {
 		return;
 	}
-	wlr_log(WLR_INFO, "toplevel requested minimize -> delegating to host WM");
+	wlr_log(WLR_INFO, "toplevel requested minimize -> delegating to host WM "
+		"(target 0x%x)", target);
 	/* ICCCM WM_CHANGE_STATE with IconicState=3. xdg-shell's minimize
 	 * request has no configure/ack round trip (unlike maximize/
 	 * fullscreen), so there's nothing further to send the client. */
-	send_root_client_message(win->server, win->xwin,
+	send_root_client_message(win->server, target,
 		win->server->atom_wm_change_state, 3 /* IconicState */, 0, 0, 0, 0);
 }
 
@@ -559,22 +603,30 @@ static void select_window_events(struct wc_server *server, xcb_window_t w) {
 	if (!server->xcb || xcb_connection_has_error(server->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
-	uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
+	/* Only FOCUS_CHANGE now: resize is handled via wlroots' own
+	 * request_state signal (see output_request_state()), not by us
+	 * watching ConfigureNotify ourselves. */
+	uint32_t mask = XCB_EVENT_MASK_FOCUS_CHANGE;
 	xcb_change_window_attributes(server->xcb, w, XCB_CW_EVENT_MASK, &mask);
 	xcb_flush(server->xcb);
 }
 
-/* Applies the default cursor and selects resize/focus events on the given
- * window AND every descendant of it (recursively), and records each one
- * against `win` so window_from_xwin() can find `win` regardless of which
- * window in the subtree an event (FocusIn, ConfigureNotify, ...) actually
- * arrives on. This is what makes both the cursor and the X11-focus ->
- * xdg_toplevel ACTIVATED wiring work even when the real interactive
- * window is a child of the one we found via the root-children diff. */
+/* Selects focus-change events on the given window AND every descendant
+ * of it (recursively) -- these are xfwm4's own decoration widgets
+ * (title bar, borders, buttons), created when it reparents our window
+ * into a frame, not anything wlroots created. We record each one against
+ * `win` so window_from_xwin() can find `win` regardless of which window
+ * in the subtree a FocusIn/FocusOut actually arrives on. The default
+ * cursor is deliberately NOT applied here (only to the content window,
+ * once identified -- see find_content_window() and its caller): forcing
+ * it across the whole subtree overrode xfwm4's own edge/corner resize
+ * cursors on its decoration windows, which we have no business touching.
+ * Resize is also deliberately NOT handled here -- see
+ * output_request_state(), which uses wlroots' own (correct) mechanism
+ * instead of us watching ConfigureNotify ourselves. */
 static void register_x11_window_subtree(struct wc_window *win, xcb_window_t w) {
 	struct wc_server *server = win->server;
 
-	xwin_set_default_cursor(server, w);
 	select_window_events(server, w);
 	wlr_log(WLR_INFO, "registered X11 window 0x%x for toplevel \"%s\"",
 		w, win->toplevel && win->toplevel->title ? win->toplevel->title : "?");
@@ -583,7 +635,7 @@ static void register_x11_window_subtree(struct wc_window *win, xcb_window_t w) {
 		win->related[win->related_count++] = w;
 	} else {
 		wlr_log(WLR_ERROR, "window subtree exceeds WC_MAX_RELATED_WINDOWS, "
-			"some descendants won't get focus/cursor handling");
+			"some descendants won't get focus handling");
 	}
 
 	xcb_window_t *children = NULL;
@@ -595,62 +647,94 @@ static void register_x11_window_subtree(struct wc_window *win, xcb_window_t w) {
 	free(children);
 }
 
-/* wlroots' X11 backend apparently doesn't keep wlr_output->width/height in
- * sync with host-driven window resizes in the version this was tested
- * against (its own events.commit never reflects the new size). So instead
- * of trusting that, we watch ConfigureNotify ourselves via our auxiliary
- * XCB connection and force the wlr_output to the observed size via
- * wlr_output_commit_state().
- *
- * That commit almost certainly also makes the X11 backend re-assert the
- * window's size at the X11 level (XConfigureWindow), which some WMs/
- * clients respond to with a *different* size of their own (e.g. GTK's
- * CSD shadow margin appearing/disappearing), which we'd observe as
- * another ConfigureNotify, echo back again, and so on forever. So rather
- * than committing on every single ConfigureNotify, we debounce: each new
- * observed size resets a short timer, and we only actually commit once
- * things have been quiet for a bit. A tight external fight collapses
- * into at most one commit per quiet period instead of feeding itself. */
-#define WC_RESIZE_DEBOUNCE_MS 40
+/* win->xwin (found via our root-children diff) is xfwm4's own decoration
+ * frame, not the window wlroots actually created and owns (the private
+ * struct wlr_x11_output's `win` field, which the public API doesn't
+ * expose). EWMH/ICCCM window-management messages (_NET_WM_STATE,
+ * _NET_WM_MOVERESIZE, WM_CHANGE_STATE) must target that real client
+ * window -- WMs track requests by the original client id, and have no
+ * reason to handle messages addressed to their own frame, which isn't a
+ * "client" in their bookkeeping at all. This heuristically identifies
+ * that window among the registered subtree: it's overwhelmingly the
+ * largest-area descendant, since decoration widgets (title bar strip,
+ * borders, buttons) are comparatively tiny. */
+static xcb_window_t find_content_window(struct wc_server *server, struct wc_window *win) {
+	xcb_window_t best = XCB_WINDOW_NONE;
+	uint32_t best_area = 0;
 
-static int resize_debounce_fired(void *data) {
-	struct wc_window *win = data;
-	int width = win->pending_resize_width;
-	int height = win->pending_resize_height;
-
-	if (!win->output || width <= 0 || height <= 0) {
-		return 0;
+	for (int i = 0; i < win->related_count; i++) {
+		xcb_window_t w = win->related[i];
+		if (w == XCB_WINDOW_NONE || w == win->xwin) {
+			continue;
+		}
+		xcb_get_geometry_cookie_t cookie = xcb_get_geometry(server->xcb, w);
+		xcb_get_geometry_reply_t *reply =
+			xcb_get_geometry_reply(server->xcb, cookie, NULL);
+		if (!reply) {
+			continue;
+		}
+		uint32_t area = (uint32_t)reply->width * (uint32_t)reply->height;
+		if (area > best_area) {
+			best_area = area;
+			best = w;
+		}
+		free(reply);
 	}
-	if (width == win->last_output_width && height == win->last_output_height) {
-		return 0;
+
+	if (best != XCB_WINDOW_NONE) {
+		wlr_log(WLR_INFO, "identified 0x%x as the real content window "
+			"(largest descendant, area=%u) under frame 0x%x",
+			best, best_area, win->xwin);
+	} else {
+		wlr_log(WLR_ERROR, "could not identify a content window under "
+			"frame 0x%x; window-management requests (move/resize/"
+			"maximize/minimize) will fall back to targeting the frame "
+			"and likely be ignored by the WM", win->xwin);
 	}
-
-	wlr_log(WLR_INFO, "debounced X11 resize settling at %dx%d", width, height);
-
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, width, height, 0);
-	wlr_output_commit_state(win->output, &state);
-	wlr_output_state_finish(&state);
-	return 0;
+	return best;
 }
 
-static void apply_x11_resize(struct wc_window *win, int width, int height) {
-	if (!win->output || width <= 0 || height <= 0) {
-		return;
-	}
-	if (width == win->last_output_width && height == win->last_output_height) {
-		return;
-	}
-	wlr_log(WLR_INFO, "observed X11 ConfigureNotify resize to %dx%d "
-		"(debouncing %dms)", width, height, WC_RESIZE_DEBOUNCE_MS);
+/* Earlier versions of this file tried to detect X11-driven resizes
+ * ourselves, via our own auxiliary XCB connection watching
+ * ConfigureNotify on what we assumed was "the" window. Reading wlroots'
+ * actual X11 backend source (backend/x11/output.c) revealed why that was
+ * wrong: wlr_x11_output_create() creates exactly one window
+ * (output->win). Everything else we were seeing in the subtree under
+ * win->xwin -- title bar strip, side/corner borders, buttons -- is
+ * created by the *window manager* (xfwm4) when it reparents our window
+ * into a decorated frame. win->xwin (found via our root-children diff)
+ * is that frame; the real wlroots-owned content window is a *child* of
+ * it, sized to the frame's content area (frame size minus border/
+ * titlebar overhead).
+ *
+ * wlr_output_commit_state()'s custom-mode path resizes output->win (the
+ * content window) directly. Feeding it the *frame's* observed size told
+ * the small inner content window to become as big as the whole decorated
+ * frame, overshooting by the border/titlebar overhead -- which made
+ * xfwm4 grow the frame again to fit the oversized child, which we'd
+ * observe and repeat: the runaway-growth loop.
+ *
+ * wlroots already has the correct mechanism for this, and we just
+ * weren't using it: its own X11 event handling watches output->win (the
+ * right window) and, on a real resize, calls
+ * wlr_output_send_request_state(), which emits wlr_output's
+ * events.request_state signal for the compositor to accept. Accepting a
+ * state that already matches is a documented no-op in the backend
+ * (output_set_custom_mode() checks `width == output->win_width` and
+ * returns immediately without touching X11 at all if so), so this can't
+ * feed back on itself. This replaces all of our own ConfigureNotify-based
+ * resize detection. */
+static void output_request_state(struct wl_listener *listener, void *data) {
+	struct wc_window *win = wl_container_of(listener, win, output_request_state);
+	const struct wlr_output_event_request_state *event = data;
 
-	win->pending_resize_width = width;
-	win->pending_resize_height = height;
-	if (win->resize_debounce_timer) {
-		wl_event_source_timer_update(win->resize_debounce_timer,
-			WC_RESIZE_DEBOUNCE_MS);
-	}
+	wlr_log(WLR_INFO, "output requested state (backend-detected resize) "
+		"-> accepting");
+	/* output_commit() (below) fires synchronously as part of this call
+	 * and handles diffing the new size against what we last told the
+	 * toplevel and forwarding it if different -- nothing further needed
+	 * here. */
+	wlr_output_commit_state(win->output, event->state);
 }
 
 /* Drive both the xdg_toplevel ACTIVATED state (which is what clients like
@@ -688,28 +772,7 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	xcb_generic_event_t *event;
 	while ((event = xcb_poll_for_event(server->xcb)) != NULL) {
 		uint8_t type = event->response_type & ~0x80;
-		if (type == XCB_CONFIGURE_NOTIFY) {
-			xcb_configure_notify_event_t *cn = (xcb_configure_notify_event_t *)event;
-			/* Deliberately NOT using window_from_xwin() here: that also
-			 * matches descendant windows (CSD title bar buttons, shadow
-			 * border strips, etc.), whose own internal layout resizes
-			 * must not be mistaken for the toplevel itself resizing --
-			 * doing so was feeding garbage sizes (e.g. a 20x24 button)
-			 * into apply_x11_resize() and causing runaway growth. Only
-			 * react when the event is for a window we know as an actual
-			 * top-level. */
-			struct wc_window *win;
-			bool found = false;
-			wl_list_for_each(win, &server->windows, link) {
-				if (win->xwin == cn->window) {
-					found = true;
-					break;
-				}
-			}
-			if (found) {
-				apply_x11_resize(win, cn->width, cn->height);
-			}
-		} else if (type == XCB_FOCUS_IN) {
+		if (type == XCB_FOCUS_IN) {
 			xcb_focus_in_event_t *fi = (xcb_focus_in_event_t *)event;
 			struct wc_window *win = window_from_xwin(server, fi->event);
 			if (win) {
@@ -740,8 +803,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	 * creation didn't stick), so keep re-asserting a normal cursor every
 	 * frame. This is a cheap XChangeWindowAttributes call and is a
 	 * brute-force fix regardless of exactly when/why the backend resets
-	 * it. */
-	xwin_set_default_cursor(win->server, win->xwin);
+	 * it. Only on the content window, not the frame -- xfwm4 needs to
+	 * keep control of its own decoration cursors (resize arrows, etc). */
+	xwin_set_default_cursor(win->server, win->content_xwin);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -787,6 +851,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&win->output_frame.link);
 	wl_list_remove(&win->output_destroy.link);
 	wl_list_remove(&win->output_commit.link);
+	wl_list_remove(&win->output_request_state.link);
 
 	win->output = NULL;
 	win->scene_output = NULL;
@@ -873,6 +938,8 @@ static void create_output_for_window(struct wc_window *win) {
 	wl_signal_add(&output->events.destroy, &win->output_destroy);
 	win->output_commit.notify = output_commit;
 	wl_signal_add(&output->events.commit, &win->output_commit);
+	win->output_request_state.notify = output_request_state;
+	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
 	int w = output->width > 0 ? output->width : WC_DEFAULT_WIDTH;
 	int h = output->height > 0 ? output->height : WC_DEFAULT_HEIGHT;
@@ -906,6 +973,8 @@ static void create_output_for_window(struct wc_window *win) {
 		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
 			win->xwin);
 		register_x11_window_subtree(win, win->xwin);
+		win->content_xwin = find_content_window(server, win);
+		xwin_set_default_cursor(server, win->content_xwin);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
@@ -993,8 +1062,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	if (win->server->focused_window == win) {
 		win->server->focused_window = NULL;
 	}
-	if (win->resize_debounce_timer) {
-		wl_event_source_remove(win->resize_debounce_timer);
+	if (win->server->move_win == win) {
+		win->server->move_win = NULL;
+	}
+	if (win->server->resize_win == win) {
+		win->server->resize_win = NULL;
 	}
 
 	wl_list_remove(&win->map.link);
@@ -1087,8 +1159,6 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	win->server = server;
 	win->toplevel = toplevel;
 	win->xwin = XCB_WINDOW_NONE;
-	win->resize_debounce_timer = wl_event_loop_add_timer(server->loop,
-		resize_debounce_fired, win);
 
 	win->scene_tree = wlr_scene_xdg_surface_create(&server->scene->tree,
 		toplevel->base);
@@ -1138,7 +1208,94 @@ static struct wlr_surface *surface_at_cursor(struct wc_server *server,
 	return scene_surface->surface;
 }
 
-static void process_cursor_motion(struct wc_server *server, uint32_t time_msec) {
+static void apply_interactive_move(struct wc_server *server, double dx, double dy) {
+	struct wc_window *win = server->move_win;
+
+	server->move_win_x += (int)dx;
+	server->move_win_y += (int)dy;
+
+	wlr_log(WLR_INFO, "apply_interactive_move: raw delta (%.2f,%.2f) -> "
+		"requesting window 0x%x at (%d,%d)", dx, dy, win->xwin,
+		server->move_win_x, server->move_win_y);
+
+	uint32_t values[2] = {
+		(uint32_t)server->move_win_x, (uint32_t)server->move_win_y,
+	};
+	xcb_configure_window(server->xcb, win->xwin,
+		XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+	xcb_flush(server->xcb);
+
+	int16_t actual_x, actual_y;
+	if (query_window_root_position(server, win->xwin, &actual_x, &actual_y)) {
+		wlr_log(WLR_INFO, "apply_interactive_move: window 0x%x now actually "
+			"reports position (%d,%d) (requested (%d,%d))", win->xwin,
+			actual_x, actual_y, server->move_win_x, server->move_win_y);
+	}
+}
+
+#define WC_MIN_WINDOW_SIZE 50
+
+static void apply_interactive_resize(struct wc_server *server, double dx, double dy) {
+	struct wc_window *win = server->resize_win;
+
+	int x = server->resize_win_x;
+	int y = server->resize_win_y;
+	int w = server->resize_win_w;
+	int h = server->resize_win_h;
+
+	if (server->resize_edges & WLR_EDGE_LEFT) {
+		x += (int)dx;
+		w -= (int)dx;
+	} else if (server->resize_edges & WLR_EDGE_RIGHT) {
+		w += (int)dx;
+	}
+	if (server->resize_edges & WLR_EDGE_TOP) {
+		y += (int)dy;
+		h -= (int)dy;
+	} else if (server->resize_edges & WLR_EDGE_BOTTOM) {
+		h += (int)dy;
+	}
+
+	if (w < WC_MIN_WINDOW_SIZE) {
+		w = WC_MIN_WINDOW_SIZE;
+	}
+	if (h < WC_MIN_WINDOW_SIZE) {
+		h = WC_MIN_WINDOW_SIZE;
+	}
+
+	server->resize_win_x = x;
+	server->resize_win_y = y;
+	server->resize_win_w = w;
+	server->resize_win_h = h;
+
+	uint32_t values[4] = {
+		(uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h,
+	};
+	xcb_configure_window(server->xcb, win->xwin,
+		XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+		XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
+	xcb_flush(server->xcb);
+}
+
+/* raw_dx/raw_dy are the *unclamped* motion delta for this event -- see
+ * server_cursor_motion()/server_cursor_motion_absolute() below. Deriving
+ * the move/resize delta from wlr_cursor's own x/y instead (its position
+ * is clamped to our internal, purely-bookkeeping auto-tiled output
+ * layout, which has no relation to real desktop geometry and is exactly
+ * window-sized per output) caused dragged movement to randomly stall
+ * ("hit invisible walls") and average out slower than real mouse motion
+ * whenever the real pointer strayed outside that tiny internal box. */
+static void process_cursor_motion(struct wc_server *server, uint32_t time_msec,
+		double raw_dx, double raw_dy) {
+	if (server->move_win) {
+		apply_interactive_move(server, raw_dx, raw_dy);
+		return;
+	}
+	if (server->resize_win) {
+		apply_interactive_resize(server, raw_dx, raw_dy);
+		return;
+	}
+
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = surface_at_cursor(server, &sx, &sy);
 	if (surface) {
@@ -1152,18 +1309,35 @@ static void process_cursor_motion(struct wc_server *server, uint32_t time_msec) 
 static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	struct wc_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
+	if (server->move_win) {
+		wlr_log(WLR_INFO, "server_cursor_motion (relative): raw event "
+			"delta=(%.2f,%.2f) unaccel_delta=(%.2f,%.2f)",
+			event->delta_x, event->delta_y,
+			event->unaccel_dx, event->unaccel_dy);
+	}
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 		event->delta_x, event->delta_y);
-	process_cursor_motion(server, event->time_msec);
+	/* event->delta_x/y are the raw, unclamped relative motion values --
+	 * exactly what we want for dragging, unlike server->cursor->x/y. */
+	process_cursor_motion(server, event->time_msec, event->delta_x, event->delta_y);
 }
 
 static void server_cursor_motion_absolute(struct wl_listener *listener, void *data) {
 	struct wc_server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
+	double old_x = server->cursor->x;
+	double old_y = server->cursor->y;
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
 		event->x, event->y);
-	process_cursor_motion(server, event->time_msec);
+	/* Absolute devices (rare in practice here -- normal mice report
+	 * relative motion) don't give us a raw delta directly, so fall back
+	 * to diffing wlr_cursor's before/after position for this one event.
+	 * Still susceptible to the same clamping in principle, but only for
+	 * this less-common input path. */
+	double dx = server->cursor->x - old_x;
+	double dy = server->cursor->y - old_y;
+	process_cursor_motion(server, event->time_msec, dx, dy);
 }
 
 static struct wc_window *window_from_surface(struct wlr_surface *surface) {
@@ -1182,6 +1356,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 		event->button, event->state);
 
 	if ((uint32_t)event->state != (uint32_t)WLR_BUTTON_PRESSED) {
+		if (server->move_win) {
+			wlr_log(WLR_INFO, "ending self-driven interactive move");
+			server->move_win = NULL;
+		}
+		if (server->resize_win) {
+			wlr_log(WLR_INFO, "ending self-driven interactive resize");
+			server->resize_win = NULL;
+		}
 		return;
 	}
 
@@ -1310,10 +1492,24 @@ static int handle_terminate_signal(int signal_number, void *data) {
 /* ------------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
-	(void)argc;
-	(void)argv;
+	bool debug = false;
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--debug") == 0) {
+			debug = true;
+		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+			printf("usage: wc-x11 [--debug]\n"
+				"  --debug   print verbose diagnostic logging "
+				"(default: only errors)\n");
+			return 0;
+		}
+	}
 
-	wlr_log_init(WLR_INFO, NULL);
+	/* All of our own diagnostic wlr_log(WLR_INFO, ...) calls throughout
+	 * this file are gated by this: at the default WLR_ERROR level they
+	 * simply won't print, leaving only genuine errors (and whatever
+	 * wlroots itself logs at WLR_ERROR) on stderr. --debug raises it
+	 * back to WLR_INFO to see everything. */
+	wlr_log_init(debug ? WLR_INFO : WLR_ERROR, NULL);
 
 	const char *x11_display = getenv("DISPLAY");
 	if (!x11_display) {
