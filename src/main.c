@@ -975,8 +975,14 @@ static void create_output_for_window(struct wc_window *win) {
 		register_x11_window_subtree(win, win->xwin);
 		win->content_xwin = find_content_window(server, win);
 		xwin_set_default_cursor(server, win->content_xwin);
+		/* Set on both: the frame (win->xwin), since that's what xfwm4
+		 * appears to actually display, and the content window (the
+		 * correct ICCCM target), for robustness across other WMs/tools
+		 * that read WM_NAME from the real client window instead. */
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
+		xwin_set_title(server, win->content_xwin, win->toplevel->title);
+		xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
 			win->toplevel->title ? win->toplevel->title : "");
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s",
@@ -1045,10 +1051,12 @@ static void surface_commit(struct wl_listener *listener, void *data) {
 
 	if (strncmp(title, win->last_title, sizeof(win->last_title)) != 0) {
 		xwin_set_title(win->server, win->xwin, title);
+		xwin_set_title(win->server, win->content_xwin, title);
 		snprintf(win->last_title, sizeof(win->last_title), "%s", title);
 	}
 	if (strncmp(app_id, win->last_app_id, sizeof(win->last_app_id)) != 0) {
 		xwin_set_class(win->server, win->xwin, app_id);
+		xwin_set_class(win->server, win->content_xwin, app_id);
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s", app_id);
 	}
 }
