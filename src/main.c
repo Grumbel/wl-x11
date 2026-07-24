@@ -116,20 +116,39 @@ struct wc_server {
 	struct wl_list windows; /* wc_window::link */
 	struct wc_window *focused_window;
 
-	/* Self-driven interactive move/resize state. See begin_interactive_move()
-	 * and begin_interactive_resize() for why we don't delegate this to the
-	 * host WM via _NET_WM_MOVERESIZE: doing so put xfwm4's own interactive-
-	 * grab in direct conflict with our own input handling (both wanting
-	 * authority over the same live pointer stream), which manifested as an
-	 * X bell and no actual move/resize happening. Driving it ourselves
-	 * avoids that entirely, since we already see every motion event during
-	 * the drag directly. */
+	/* Self-driven interactive move/resize state. We don't delegate this
+	 * to the host WM via _NET_WM_MOVERESIZE: doing so put xfwm4's own
+	 * interactive-grab in direct conflict with our own input handling
+	 * (both wanting authority over the same live pointer stream),
+	 * producing an X bell and no actual move/resize happening.
+	 *
+	 * We also don't drive it purely from wlroots' own motion events:
+	 * win->xwin is a direct child of root, so xfwm4 has SubstructureRedirect
+	 * on it and our xcb_configure_window() calls are only *requests* it
+	 * processes asynchronously, not immediate placements -- and since
+	 * normal X11 motion delivery only reaches whichever window currently
+	 * contains the pointer, a window lagging behind the real mouse
+	 * (because of that WM-mediation delay) quickly ends up with the
+	 * pointer outside its own bounds, silently losing further motion
+	 * events ("hits a wall") until it catches up.
+	 *
+	 * So during a drag we take an active core-protocol pointer grab on
+	 * our own auxiliary XCB connection (see begin_interactive_move() /
+	 * begin_interactive_resize()) and drive movement from the grab's own
+	 * raw MotionNotify/ButtonRelease events (handled in
+	 * handle_xcb_readable()) instead -- this is what real window managers
+	 * do for exactly this kind of operation. */
 	struct wc_window *move_win;
 	int move_win_x, move_win_y;             /* running real root position */
 
 	struct wc_window *resize_win;
 	uint32_t resize_edges;
 	int resize_win_x, resize_win_y, resize_win_w, resize_win_h; /* running */
+
+	/* Last known raw root position from our own XCB pointer grab, held
+	 * for the duration of a move/resize -- see begin_interactive_move()
+	 * and handle_xcb_readable()'s XCB_MOTION_NOTIFY case. */
+	int16_t drag_last_x, drag_last_y;
 
 	/* Auxiliary connection used only to set WM_NAME / WM_CLASS on the
 	 * X11 windows that the wlroots X11 backend creates for us. */
@@ -436,14 +455,71 @@ static bool query_window_geometry(struct wc_server *s, xcb_window_t w,
 	return true;
 }
 
-/* Sending _NET_WM_MOVERESIZE and letting xfwm4 drive an interactive move
- * via its own pointer grab put it in direct conflict with our own input
- * handling (both wanting the same live pointer stream), producing an
- * X bell and no actual movement -- confirmed by testing. Instead, we
- * track the drag ourselves using motion events we already receive (see
- * process_cursor_motion()), and move the real X11 frame window (xwin)
- * directly via xcb_configure_window as the pointer moves. This mirrors
- * exactly what a manual host-WM border-drag already does successfully. */
+/* Real, current root-relative pointer position, used as the starting
+ * reference point for a drag (see begin_interactive_move()/
+ * begin_interactive_resize()). */
+static bool query_root_pointer_position(struct wc_server *s, int16_t *x, int16_t *y) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb)) {
+		return false;
+	}
+	xcb_query_pointer_cookie_t cookie = xcb_query_pointer(s->xcb, s->xcb_root);
+	xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply(s->xcb, cookie, NULL);
+	if (!reply) {
+		return false;
+	}
+	*x = reply->root_x;
+	*y = reply->root_y;
+	free(reply);
+	return true;
+}
+
+/* Establish a real, global pointer grab for the duration of the drag.
+ * This is what real window managers do for exactly this situation, and
+ * it's necessary here: win->xwin (the frame) is a direct child of root,
+ * so xfwm4 has SubstructureRedirect on it -- our xcb_configure_window()
+ * calls never take effect directly, they arrive as ConfigureRequest
+ * events xfwm4 processes on its own schedule, meaning the window we're
+ * dragging visibly lags behind the real pointer. Without a grab, normal
+ * X11 motion delivery only reaches whichever window currently contains
+ * the pointer -- so as soon as that lag lets the real pointer drift
+ * outside the (moving) window's bounds, we'd stop receiving motion
+ * entirely until it caught back up, producing exactly the stall/"wall"
+ * behavior observed. An active grab makes the server deliver motion to
+ * us regardless of window boundaries, for as long as we hold it. */
+static bool begin_pointer_grab(struct wc_server *server) {
+	if (!server->xcb || xcb_connection_has_error(server->xcb)) {
+		return false;
+	}
+	xcb_grab_pointer_cookie_t cookie = xcb_grab_pointer(server->xcb,
+		0 /* owner_events */, server->xcb_root,
+		XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_RELEASE,
+		XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC,
+		XCB_NONE /* confine_to: none, whole screen */,
+		XCB_NONE /* cursor: keep whatever's currently shown */,
+		XCB_CURRENT_TIME);
+	xcb_grab_pointer_reply_t *reply =
+		xcb_grab_pointer_reply(server->xcb, cookie, NULL);
+	if (!reply) {
+		wlr_log(WLR_ERROR, "begin_pointer_grab: no reply");
+		return false;
+	}
+	bool ok = reply->status == XCB_GRAB_STATUS_SUCCESS;
+	if (!ok) {
+		wlr_log(WLR_ERROR, "begin_pointer_grab: grab failed (status %d)",
+			reply->status);
+	}
+	free(reply);
+	return ok;
+}
+
+static void end_pointer_grab(struct wc_server *server) {
+	if (!server->xcb || xcb_connection_has_error(server->xcb)) {
+		return;
+	}
+	xcb_ungrab_pointer(server->xcb, XCB_CURRENT_TIME);
+	xcb_flush(server->xcb);
+}
+
 static void begin_interactive_move(struct wc_window *win) {
 	struct wc_server *server = win->server;
 	int16_t x, y;
@@ -451,11 +527,19 @@ static void begin_interactive_move(struct wc_window *win) {
 			!query_window_root_position(server, win->xwin, &x, &y)) {
 		return;
 	}
+	int16_t px, py;
+	if (!query_root_pointer_position(server, &px, &py) ||
+			!begin_pointer_grab(server)) {
+		return;
+	}
 	server->move_win = win;
 	server->move_win_x = x;
 	server->move_win_y = y;
+	server->drag_last_x = px;
+	server->drag_last_y = py;
 	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
-		"0x%x at (%d,%d)", win->xwin, x, y);
+		"0x%x at (%d,%d), pointer grabbed at (%d,%d)", win->xwin, x, y,
+		px, py);
 }
 
 static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
@@ -467,14 +551,22 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 			!query_window_geometry(server, win->xwin, &w, &h)) {
 		return;
 	}
+	int16_t px, py;
+	if (!query_root_pointer_position(server, &px, &py) ||
+			!begin_pointer_grab(server)) {
+		return;
+	}
 	server->resize_win = win;
 	server->resize_edges = edges;
 	server->resize_win_x = x;
 	server->resize_win_y = y;
 	server->resize_win_w = w;
 	server->resize_win_h = h;
+	server->drag_last_x = px;
+	server->drag_last_y = py;
 	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
-		"0x%x (edges 0x%x) at (%d,%d) %dx%d", win->xwin, edges, x, y, w, h);
+		"0x%x (edges 0x%x) at (%d,%d) %dx%d, pointer grabbed at (%d,%d)",
+		win->xwin, edges, x, y, w, h, px, py);
 }
 
 static void toplevel_request_move(struct wl_listener *listener, void *data) {
@@ -764,6 +856,9 @@ static void set_active_window(struct wc_server *server, struct wc_window *win) {
 	}
 }
 
+static void apply_interactive_move(struct wc_server *server, double dx, double dy);
+static void apply_interactive_resize(struct wc_server *server, double dx, double dy);
+
 static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	(void)fd;
 	(void)mask;
@@ -784,6 +879,46 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			if (server->focused_window && server->focused_window->xwin == fo->event) {
 				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x", fo->event);
 				set_active_window(server, NULL);
+			}
+		} else if (type == XCB_MOTION_NOTIFY) {
+			/* Only delivered to us at all while we hold the pointer grab
+			 * from begin_interactive_move()/begin_interactive_resize() --
+			 * see the comment on begin_pointer_grab() for why we need
+			 * this instead of driving the drag from wlroots' own motion
+			 * events. */
+			if (server->move_win || server->resize_win) {
+				xcb_motion_notify_event_t *mn = (xcb_motion_notify_event_t *)event;
+				double dx = mn->root_x - server->drag_last_x;
+				double dy = mn->root_y - server->drag_last_y;
+				server->drag_last_x = mn->root_x;
+				server->drag_last_y = mn->root_y;
+				if (server->move_win) {
+					apply_interactive_move(server, dx, dy);
+				} else {
+					apply_interactive_resize(server, dx, dy);
+				}
+			}
+		} else if (type == XCB_BUTTON_RELEASE) {
+			if (server->move_win || server->resize_win) {
+				xcb_button_release_event_t *br =
+					(xcb_button_release_event_t *)event;
+				/* wlroots' own connection never sees this event during
+				 * our exclusive grab, so its (and therefore the client's)
+				 * idea of button state would otherwise never update. */
+				wlr_seat_pointer_notify_button(server->seat,
+					(uint32_t)(br->time), br->detail, WLR_BUTTON_RELEASED);
+				wlr_seat_pointer_notify_frame(server->seat);
+
+				if (server->move_win) {
+					wlr_log(WLR_INFO, "ending self-driven interactive move "
+						"(grab button release)");
+					server->move_win = NULL;
+				} else {
+					wlr_log(WLR_INFO, "ending self-driven interactive resize "
+						"(grab button release)");
+					server->resize_win = NULL;
+				}
+				end_pointer_grab(server);
 			}
 		}
 		free(event);
@@ -1072,9 +1207,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	}
 	if (win->server->move_win == win) {
 		win->server->move_win = NULL;
+		end_pointer_grab(win->server);
 	}
 	if (win->server->resize_win == win) {
 		win->server->resize_win = NULL;
+		end_pointer_grab(win->server);
 	}
 
 	wl_list_remove(&win->map.link);
@@ -1222,23 +1359,12 @@ static void apply_interactive_move(struct wc_server *server, double dx, double d
 	server->move_win_x += (int)dx;
 	server->move_win_y += (int)dy;
 
-	wlr_log(WLR_INFO, "apply_interactive_move: raw delta (%.2f,%.2f) -> "
-		"requesting window 0x%x at (%d,%d)", dx, dy, win->xwin,
-		server->move_win_x, server->move_win_y);
-
 	uint32_t values[2] = {
 		(uint32_t)server->move_win_x, (uint32_t)server->move_win_y,
 	};
 	xcb_configure_window(server->xcb, win->xwin,
 		XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
 	xcb_flush(server->xcb);
-
-	int16_t actual_x, actual_y;
-	if (query_window_root_position(server, win->xwin, &actual_x, &actual_y)) {
-		wlr_log(WLR_INFO, "apply_interactive_move: window 0x%x now actually "
-			"reports position (%d,%d) (requested (%d,%d))", win->xwin,
-			actual_x, actual_y, server->move_win_x, server->move_win_y);
-	}
 }
 
 #define WC_MIN_WINDOW_SIZE 50
@@ -1285,22 +1411,14 @@ static void apply_interactive_resize(struct wc_server *server, double dx, double
 	xcb_flush(server->xcb);
 }
 
-/* raw_dx/raw_dy are the *unclamped* motion delta for this event -- see
- * server_cursor_motion()/server_cursor_motion_absolute() below. Deriving
- * the move/resize delta from wlr_cursor's own x/y instead (its position
- * is clamped to our internal, purely-bookkeeping auto-tiled output
- * layout, which has no relation to real desktop geometry and is exactly
- * window-sized per output) caused dragged movement to randomly stall
- * ("hit invisible walls") and average out slower than real mouse motion
- * whenever the real pointer strayed outside that tiny internal box. */
-static void process_cursor_motion(struct wc_server *server, uint32_t time_msec,
-		double raw_dx, double raw_dy) {
-	if (server->move_win) {
-		apply_interactive_move(server, raw_dx, raw_dy);
-		return;
-	}
-	if (server->resize_win) {
-		apply_interactive_resize(server, raw_dx, raw_dy);
+/* Move/resize are no longer driven from here -- see the comment on
+ * begin_pointer_grab() for why: they're driven by our own XCB pointer
+ * grab's MotionNotify/ButtonRelease events instead (handled in
+ * handle_xcb_readable()). We still skip normal surface hit-test dispatch
+ * while a drag is active, so the dragged client doesn't get pointer-enter
+ * noise while its window is being moved out from under the cursor. */
+static void process_cursor_motion(struct wc_server *server, uint32_t time_msec) {
+	if (server->move_win || server->resize_win) {
 		return;
 	}
 
@@ -1317,35 +1435,18 @@ static void process_cursor_motion(struct wc_server *server, uint32_t time_msec,
 static void server_cursor_motion(struct wl_listener *listener, void *data) {
 	struct wc_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
-	if (server->move_win) {
-		wlr_log(WLR_INFO, "server_cursor_motion (relative): raw event "
-			"delta=(%.2f,%.2f) unaccel_delta=(%.2f,%.2f)",
-			event->delta_x, event->delta_y,
-			event->unaccel_dx, event->unaccel_dy);
-	}
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 		event->delta_x, event->delta_y);
-	/* event->delta_x/y are the raw, unclamped relative motion values --
-	 * exactly what we want for dragging, unlike server->cursor->x/y. */
-	process_cursor_motion(server, event->time_msec, event->delta_x, event->delta_y);
+	process_cursor_motion(server, event->time_msec);
 }
 
 static void server_cursor_motion_absolute(struct wl_listener *listener, void *data) {
 	struct wc_server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
-	double old_x = server->cursor->x;
-	double old_y = server->cursor->y;
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
 		event->x, event->y);
-	/* Absolute devices (rare in practice here -- normal mice report
-	 * relative motion) don't give us a raw delta directly, so fall back
-	 * to diffing wlr_cursor's before/after position for this one event.
-	 * Still susceptible to the same clamping in principle, but only for
-	 * this less-common input path. */
-	double dx = server->cursor->x - old_x;
-	double dy = server->cursor->y - old_y;
-	process_cursor_motion(server, event->time_msec, dx, dy);
+	process_cursor_motion(server, event->time_msec);
 }
 
 static struct wc_window *window_from_surface(struct wlr_surface *surface) {
@@ -1365,12 +1466,16 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 
 	if ((uint32_t)event->state != (uint32_t)WLR_BUTTON_PRESSED) {
 		if (server->move_win) {
-			wlr_log(WLR_INFO, "ending self-driven interactive move");
+			wlr_log(WLR_INFO, "ending self-driven interactive move "
+				"(fallback path)");
 			server->move_win = NULL;
+			end_pointer_grab(server);
 		}
 		if (server->resize_win) {
-			wlr_log(WLR_INFO, "ending self-driven interactive resize");
+			wlr_log(WLR_INFO, "ending self-driven interactive resize "
+				"(fallback path)");
 			server->resize_win = NULL;
+			end_pointer_grab(server);
 		}
 		return;
 	}
