@@ -158,6 +158,19 @@ struct wc_server {
 	 * WC_DRAG_THROTTLE_MS. */
 	struct timespec drag_last_send_at;
 
+	/* Closed-loop correction: testing showed xfwm4 places the frame at a
+	 * position systematically offset from what we request (consistently
+	 * +4,+24 in one test -- lines up with the border+titlebar size, but
+	 * we don't assume a fixed value since that'd be WM-theme-specific).
+	 * We track the most recent (x,y) we asked for, and the moment we see
+	 * a real ConfigureNotify for the dragged window (in
+	 * handle_xcb_readable()) we learn correction = observed - requested
+	 * and subtract it from future requests, so the discrepancy converges
+	 * to zero after the first real round trip instead of staying as a
+	 * constant, uncorrected jump for the whole drag. */
+	int drag_last_requested_x, drag_last_requested_y;
+	int drag_correction_x, drag_correction_y;
+
 	/* Auxiliary connection used only to set WM_NAME / WM_CLASS on the
 	 * X11 windows that the wlroots X11 backend creates for us. */
 	xcb_connection_t *xcb;
@@ -497,6 +510,8 @@ static void begin_interactive_move(struct wc_window *win) {
 	server->move_offset_x = wx - px;
 	server->move_offset_y = wy - py;
 	server->drag_last_send_at = (struct timespec){0};
+	server->drag_correction_x = 0;
+	server->drag_correction_y = 0;
 	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
 		"0x%x at (%d,%d), pointer at (%d,%d), offset (%d,%d)",
 		win->xwin, wx, wy, px, py, server->move_offset_x, server->move_offset_y);
@@ -521,6 +536,8 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	server->resize_start_pointer_x = px;
 	server->resize_start_pointer_y = py;
 	server->drag_last_send_at = (struct timespec){0};
+	server->drag_correction_x = 0;
+	server->drag_correction_y = 0;
 	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
 		"0x%x (edges 0x%x) at (%d,%d) %dx%d, pointer at (%d,%d)",
 		win->xwin, edges, wx, wy, w, h, px, py);
@@ -840,22 +857,28 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				set_active_window(server, NULL);
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
-			/* Pure diagnostic observation -- we deliberately do NOT act
-			 * on this. Only logged while a drag is active, and only for
-			 * the actual top-level window (not the decoration subtree),
-			 * to see xfwm4's real, ground-truth geometry changes to the
-			 * frame during a move/resize, independent of our own
-			 * internal bookkeeping of what we think we asked for. */
+			/* Learn xfwm4's systematic position discrepancy from real
+			 * feedback (see the comment on struct wc_server's
+			 * drag_correction_x field) rather than assuming a fixed
+			 * value, since it's WM-theme-specific. Only for the actual
+			 * top-level window (not the decoration subtree). */
 			if (server->move_win || server->resize_win) {
 				xcb_configure_notify_event_t *cn =
 					(xcb_configure_notify_event_t *)event;
 				struct wc_window *active =
 					server->move_win ? server->move_win : server->resize_win;
 				if (cn->window == active->xwin) {
+					int new_correction_x = cn->x - server->drag_last_requested_x;
+					int new_correction_y = cn->y - server->drag_last_requested_y;
 					wlr_log(WLR_INFO, "[DIAG] real ConfigureNotify for "
 						"dragged window 0x%x: pos=(%d,%d) size=%dx%d "
-						"border=%d", cn->window, cn->x, cn->y,
-						cn->width, cn->height, cn->border_width);
+						"border=%d (learned correction now (%d,%d), "
+						"was (%d,%d))", cn->window, cn->x, cn->y,
+						cn->width, cn->height, cn->border_width,
+						new_correction_x, new_correction_y,
+						server->drag_correction_x, server->drag_correction_y);
+					server->drag_correction_x = new_correction_x;
+					server->drag_correction_y = new_correction_y;
 				}
 			}
 		}
@@ -1325,10 +1348,14 @@ static void update_interactive_drag(struct wc_server *server) {
 	}
 
 	if (server->move_win) {
-		int x = px + server->move_offset_x;
-		int y = py + server->move_offset_y;
+		int x = px + server->move_offset_x - server->drag_correction_x;
+		int y = py + server->move_offset_y - server->drag_correction_y;
+		server->drag_last_requested_x = x;
+		server->drag_last_requested_y = y;
 		wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window "
-			"0x%x at (%d,%d)", px, py, server->move_win->xwin, x, y);
+			"0x%x at (%d,%d) (correction (%d,%d))", px, py,
+			server->move_win->xwin, x, y, server->drag_correction_x,
+			server->drag_correction_y);
 		uint32_t values[2] = { (uint32_t)x, (uint32_t)y };
 		xcb_configure_window(server->xcb, server->move_win->xwin,
 			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
@@ -1362,9 +1389,15 @@ static void update_interactive_drag(struct wc_server *server) {
 	if (h < WC_MIN_WINDOW_SIZE) {
 		h = WC_MIN_WINDOW_SIZE;
 	}
+	x -= server->drag_correction_x;
+	y -= server->drag_correction_y;
+	server->drag_last_requested_x = x;
+	server->drag_last_requested_y = y;
 
 	wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window 0x%x "
-		"at (%d,%d) %dx%d", px, py, server->resize_win->xwin, x, y, w, h);
+		"at (%d,%d) %dx%d (correction (%d,%d))", px, py,
+		server->resize_win->xwin, x, y, w, h, server->drag_correction_x,
+		server->drag_correction_y);
 	uint32_t values[4] = {
 		(uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h,
 	};
