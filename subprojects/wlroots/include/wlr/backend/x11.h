@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include <wayland-server-core.h>
+#include <xcb/xcb.h>
 
 #include <wlr/backend.h>
 #include <wlr/types/wlr_output.h>
@@ -47,6 +48,21 @@ bool wlr_output_is_x11(const struct wlr_output *output);
  * Sets the title of a struct wlr_output which is an X11 window.
  */
 void wlr_x11_output_set_title(struct wlr_output *output, const char *title);
+
+/**
+ * Return the X11 window id backing an X11 output, or XCB_WINDOW_NONE if the
+ * output is not an X11 output.
+ *
+ * Useful for rootless compositors that need to set ICCCM/EWMH properties on
+ * the host window without guessing the id by scanning the root's children.
+ */
+xcb_window_t wlr_x11_output_get_window(struct wlr_output *output);
+
+/**
+ * Return the XCB connection used by an X11 backend, or NULL if the backend is
+ * not an X11 backend.
+ */
+xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend);
 
 /**
  * Listen for a host-WM close request (WM_DELETE_WINDOW) on an X11 output.

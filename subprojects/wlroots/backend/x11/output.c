@@ -759,6 +759,22 @@ void wlr_x11_output_set_title(struct wlr_output *output, const char *title) {
 		strlen(title), title);
 }
 
+xcb_window_t wlr_x11_output_get_window(struct wlr_output *output) {
+	if (!wlr_output_is_x11(output)) {
+		return XCB_WINDOW_NONE;
+	}
+	struct wlr_x11_output *x11_output = get_x11_output_from_output(output);
+	return x11_output->win;
+}
+
+xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend) {
+	if (!wlr_backend_is_x11(backend)) {
+		return NULL;
+	}
+	struct wlr_x11_backend *x11 = get_x11_backend_from_backend(backend);
+	return x11->xcb;
+}
+
 static struct wlr_x11_buffer *get_x11_buffer(struct wlr_x11_output *output,
 		xcb_pixmap_t pixmap) {
 	struct wlr_x11_buffer *buffer;

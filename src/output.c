@@ -459,14 +459,9 @@ void create_output_for_window(struct wlx_window *win) {
 	memset(win->related, 0, sizeof(win->related));
 	win->size_from_wm = false;
 
-	xcb_window_t *before = NULL;
-	int before_n = 0;
-	query_root_children(server->xcb, server->xcb_root, &before, &before_n);
-
 	struct wlr_output *output = wlr_x11_output_create(server->backend);
 	if (!output) {
 		wlr_log(WLR_ERROR, "failed to create X11 output for new toplevel");
-		free(before);
 		return;
 	}
 	win->output = output;
@@ -474,10 +469,7 @@ void create_output_for_window(struct wlx_window *win) {
 
 	wlr_output_init_render(output, server->allocator, server->renderer);
 
-	/* Size + map happen later. First resolve the X window id while it is
-	 * still unmapped (created by wlr_x11_output_create) so we can put
-	 * class/title/type on it before MapWindow — otherwise many host WMs
-	 * leave the window at (0,0). */
+	/* Preferred size for mode+map (backend applies MODE before MapWindow). */
 	int want_w = 0, want_h = 0;
 	toplevel_preferred_size(win, &want_w, &want_h);
 	{
@@ -486,47 +478,12 @@ void create_output_for_window(struct wlx_window *win) {
 		want_h = wlx_scale_size(server, logical_h);
 	}
 
-	if (server->xcb) {
-		xcb_flush(server->xcb);
-	}
-	xcb_roundtrip(server->xcb);
-	xcb_window_t *after = NULL;
-	int after_n = 0;
-	query_root_children(server->xcb, server->xcb_root, &after, &after_n);
-
-	win->xwin = XCB_WINDOW_NONE;
-	xcb_window_t fallback = XCB_WINDOW_NONE;
-	/* Match on default backend size (1024x768) or any new root child. */
-	for (int i = 0; i < after_n; i++) {
-		bool seen = false;
-		for (int j = 0; j < before_n; j++) {
-			if (after[i] == before[j]) {
-				seen = true;
-				break;
-			}
-		}
-		if (seen) {
-			continue;
-		}
-		if (fallback == XCB_WINDOW_NONE) {
-			fallback = after[i];
-		}
-		int gw = 0, gh = 0;
-		if (query_window_geometry(server, after[i], &gw, &gh) &&
-				((gw == 1024 && gh == 768) || (gw == want_w && gh == want_h))) {
-			win->xwin = after[i];
-			break;
-		}
-	}
-	if (win->xwin == XCB_WINDOW_NONE) {
-		win->xwin = fallback;
-	}
-	free(before);
-	free(after);
-
+	/* Stable window id from the backend — no root-child scan. Properties
+	 * are set on this window before map so the host WM sees them on
+	 * MapRequest. */
+	win->xwin = wlr_x11_output_get_window(output);
 	if (win->xwin != XCB_WINDOW_NONE) {
-		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x (unmapped)",
-			win->xwin);
+		wlr_log(WLR_INFO, "backing X11 window id 0x%x (unmapped)", win->xwin);
 		win->content_xwin = win->xwin;
 		win->related_count = 0;
 		memset(win->related, 0, sizeof(win->related));
@@ -568,8 +525,8 @@ void create_output_for_window(struct wlx_window *win) {
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s",
 			win->toplevel->app_id ? win->toplevel->app_id : "");
 	} else {
-		wlr_log(WLR_INFO, "could not resolve backing X11 window id "
-			"(title/class won't be synced, window should still be visible)");
+		wlr_log(WLR_ERROR, "wlr_x11_output_get_window returned none "
+			"(title/class won't be synced)");
 	}
 
 	/* Size then map in one commit. The X11 backend applies MODE before

@@ -11,23 +11,6 @@ the X11 backend freely.
 
 ## High impact
 
-### Expose the X window id from the backend
-
-Title/class/hints/DnD currently resolve the backing `xcb_window_t` by
-diffing the root window's children after `wlr_x11_output_create`. That is
-racey under concurrent maps and is why we still match on the backend default
-size (1024×768).
-
-Add a stable API, e.g.:
-
-```c
-xcb_window_t wlr_x11_output_get_window(struct wlr_output *output);
-xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend);
-```
-
-Then drop `query_root_children` / before-after matching. Properties can be set
-on the real window before map with no guessing.
-
 ### Popups that are not clipped
 
 `xdg_popup` content that would extend past the parent toplevel is clipped

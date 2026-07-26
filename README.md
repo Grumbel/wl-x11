@@ -103,12 +103,10 @@ one-window-per-toplevel model. Notable things it does **not** do:
   `wlr_cursor_set_surface`; the X11 backend turns them into real X cursors
   on each output window. Outside client surfaces a theme `left_ptr` is
   shown. There is no separate compositor-drawn cursor overlay.
-- **Best-effort window title/class syncing.** wlroots doesn't expose the
-  raw `xcb_window_t` for backend-created outputs, so `WM_NAME`/`WM_CLASS`
-  are set via a small side-channel XCB connection that diffs the root
-  window's children right after each output is created. This is
-  effectively always correct in practice but is not a hard guarantee
-  under heavy concurrent window creation.
+- **Window title/class syncing.** The vendored X11 backend exposes
+  `wlr_x11_output_get_window()` so the compositor can set `WM_NAME` /
+  `WM_CLASS` / ICCCM hints on the real host window before map. A side-channel
+  XCB connection is still used for property writes and event monitoring.
 - **Keyboard focus follows pointer**, click-to-focus on button press; no
   alt-tab / window switching is implemented (that's the host WM's job for
   the X11 windows anyway).

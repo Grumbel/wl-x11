@@ -23,6 +23,9 @@ is tracked in [TODO.md](TODO.md) — read that before starting larger changes.
 - Create window at (0,0) with no position flags (host WM places)
 - In `output_commit`, apply `MODE` **before** `MapWindow` so MapRequest sees
   the real client size (needed for mouse/center placement)
+- Public helpers `wlr_x11_output_get_window()` and
+  `wlr_x11_backend_get_connection()` so the compositor does not scan the
+  root window's children to find the backing X id
 
 Do not replace the subproject with an unpatched system wlroots without
 re-applying those fixes. Prefer extending the vendored tree when a change
