@@ -68,6 +68,8 @@
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_data_device.h>
+#include <wlr/types/wlr_primary_selection.h>
+#include <wlr/types/wlr_primary_selection_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
@@ -137,6 +139,7 @@ struct wlx_server {
 	struct wl_listener cursor_frame;
 	struct wl_listener request_set_cursor;
 	struct wl_listener request_set_selection;
+	struct wl_listener request_set_primary_selection;
 	struct wl_listener request_start_drag;
 	struct wl_listener start_drag;
 
@@ -210,25 +213,35 @@ struct wlx_server {
 	xcb_atom_t atom_net_wm_state_fullscreen;
 	xcb_atom_t atom_wm_change_state;
 	xcb_atom_t atom_clipboard;
+	xcb_atom_t atom_primary;
 	xcb_atom_t atom_targets;
 	xcb_atom_t atom_string;
 	xcb_atom_t atom_text;
 	xcb_atom_t atom_wlx_clipboard; /* property used for ConvertSelection */
+	xcb_atom_t atom_wlx_primary;
 
-	/* Invisible window that owns/serves the X11 CLIPBOARD selection. */
+	/* Invisible window that owns/serves X11 CLIPBOARD and PRIMARY. */
 	xcb_window_t clipboard_window;
 	uint8_t xfixes_event_base;
 	bool xfixes_ok;
 
-	/* Text we last published onto X11 CLIPBOARD (Wayland → X11). */
+	/* Text published onto X11 CLIPBOARD (Wayland → X11). */
 	char *clip_out_text;
 	size_t clip_out_len;
 	bool clip_we_own_x11;
 
-	/* Text offered to Wayland from X11 (X11 → Wayland). */
+	/* Text offered as Wayland clipboard from X11 CLIPBOARD. */
 	char *clip_in_text;
 	size_t clip_in_len;
 	bool clip_setting_from_x11; /* suppress re-export loop */
+
+	/* Same for X11 PRIMARY ↔ wp_primary_selection. */
+	char *pri_out_text;
+	size_t pri_out_len;
+	bool pri_we_own_x11;
+	char *pri_in_text;
+	size_t pri_in_len;
+	bool pri_setting_from_x11;
 
 	/* In-progress async read of a Wayland data source for export to X11. */
 	struct wl_event_source *clip_read_source;
@@ -236,6 +249,7 @@ struct wlx_server {
 	char *clip_read_buf;
 	size_t clip_read_len;
 	size_t clip_read_cap;
+	bool clip_read_is_primary; /* export target: PRIMARY vs CLIPBOARD */
 
 	/* ---- XDND (X11 drag-and-drop), text / text/uri-list only ---- */
 	xcb_atom_t atom_xdnd_aware;
@@ -283,7 +297,7 @@ static void clipboard_handle_selection_request(struct wlx_server *server,
 		xcb_selection_request_event_t *req);
 static void clipboard_handle_selection_clear(struct wlx_server *server,
 		xcb_selection_clear_event_t *ev);
-static void clipboard_request_from_x11(struct wlx_server *server);
+static void clipboard_request_from_x11(struct wlx_server *server, bool primary);
 static void clipboard_offer_x11_text_to_wayland(struct wlx_server *server,
 		char *text, size_t len);
 static bool dnd_handle_selection_request(struct wlx_server *server,
@@ -1053,7 +1067,14 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 					(xn->owner == server->clipboard_window);
 				if (!server->clip_we_own_x11 &&
 						xn->owner != XCB_WINDOW_NONE) {
-					clipboard_request_from_x11(server);
+					clipboard_request_from_x11(server, false);
+				}
+			} else if (xn->selection == server->atom_primary) {
+				server->pri_we_own_x11 =
+					(xn->owner == server->clipboard_window);
+				if (!server->pri_we_own_x11 &&
+						xn->owner != XCB_WINDOW_NONE) {
+					clipboard_request_from_x11(server, true);
 				}
 			}
 		}
@@ -1859,34 +1880,38 @@ static void clipboard_clear_read(struct wlx_server *server) {
 }
 
 static void clipboard_set_x11_owner(struct wlx_server *server,
-		const char *text, size_t len) {
+		const char *text, size_t len, bool primary) {
 	if (!server->xcb || server->clipboard_window == XCB_WINDOW_NONE) {
 		return;
 	}
-	free(server->clip_out_text);
-	server->clip_out_text = NULL;
-	server->clip_out_len = 0;
+	char **out_text = primary ? &server->pri_out_text : &server->clip_out_text;
+	size_t *out_len = primary ? &server->pri_out_len : &server->clip_out_len;
+	bool *we_own = primary ? &server->pri_we_own_x11 : &server->clip_we_own_x11;
+	xcb_atom_t sel = primary ? server->atom_primary : server->atom_clipboard;
+
+	free(*out_text);
+	*out_text = NULL;
+	*out_len = 0;
 	if (text && len > 0) {
-		server->clip_out_text = malloc(len + 1);
-		if (!server->clip_out_text) {
+		*out_text = malloc(len + 1);
+		if (!*out_text) {
 			return;
 		}
-		memcpy(server->clip_out_text, text, len);
-		server->clip_out_text[len] = '\0';
-		server->clip_out_len = len;
+		memcpy(*out_text, text, len);
+		(*out_text)[len] = '\0';
+		*out_len = len;
 	}
 	xcb_set_selection_owner(server->xcb, server->clipboard_window,
-		server->atom_clipboard, XCB_CURRENT_TIME);
+		sel, XCB_CURRENT_TIME);
 	xcb_flush(server->xcb);
 	xcb_get_selection_owner_cookie_t cookie =
-		xcb_get_selection_owner(server->xcb, server->atom_clipboard);
+		xcb_get_selection_owner(server->xcb, sel);
 	xcb_get_selection_owner_reply_t *reply =
 		xcb_get_selection_owner_reply(server->xcb, cookie, NULL);
-	server->clip_we_own_x11 = reply &&
-		reply->owner == server->clipboard_window;
+	*we_own = reply && reply->owner == server->clipboard_window;
 	free(reply);
-	wlr_log(WLR_INFO, "clipboard: claimed X11 CLIPBOARD (%zu bytes, own=%d)",
-		server->clip_out_len, server->clip_we_own_x11);
+	wlr_log(WLR_INFO, "clipboard: claimed X11 %s (%zu bytes, own=%d)",
+		primary ? "PRIMARY" : "CLIPBOARD", *out_len, *we_own);
 }
 
 static const char *clipboard_pick_mime(struct wlr_data_source *source) {
@@ -1921,7 +1946,7 @@ static int clipboard_read_fd(int fd, uint32_t mask, void *data) {
 		/* Finished: publish whatever we collected. */
 		if (server->clip_read_len > 0 && server->clip_read_buf) {
 			clipboard_set_x11_owner(server, server->clip_read_buf,
-				server->clip_read_len);
+				server->clip_read_len, server->clip_read_is_primary);
 		}
 		clipboard_clear_read(server);
 		return 0;
@@ -1942,7 +1967,7 @@ static int clipboard_read_fd(int fd, uint32_t mask, void *data) {
 		if (n == 0) {
 			if (server->clip_read_len > 0 && server->clip_read_buf) {
 				clipboard_set_x11_owner(server, server->clip_read_buf,
-					server->clip_read_len);
+					server->clip_read_len, server->clip_read_is_primary);
 			}
 			clipboard_clear_read(server);
 			return 0;
@@ -1984,6 +2009,7 @@ static void clipboard_export_wayland_source(struct wlx_server *server,
 		return;
 	}
 	clipboard_clear_read(server);
+	server->clip_read_is_primary = false;
 
 	int fds[2];
 	if (pipe(fds) < 0) {
@@ -2003,6 +2029,65 @@ static void clipboard_export_wayland_source(struct wlx_server *server,
 		return;
 	}
 	wlr_data_source_send(source, mime, fds[1]);
+	close(fds[1]);
+}
+
+static const char *primary_pick_mime(struct wlr_primary_selection_source *source) {
+	static const char *prefs[] = {
+		"text/plain;charset=utf-8",
+		"text/plain",
+		"TEXT",
+		"STRING",
+		"UTF8_STRING",
+		NULL,
+	};
+	char **p;
+	wl_array_for_each(p, &source->mime_types) {
+		for (int i = 0; prefs[i]; i++) {
+			if (strcmp(*p, prefs[i]) == 0) {
+				return *p;
+			}
+		}
+	}
+	wl_array_for_each(p, &source->mime_types) {
+		if (strncmp(*p, "text/", 5) == 0) {
+			return *p;
+		}
+	}
+	return NULL;
+}
+
+static void primary_export_wayland_source(struct wlx_server *server,
+		struct wlr_primary_selection_source *source) {
+	if (!server->xcb || !source) {
+		return;
+	}
+	const char *mime = primary_pick_mime(source);
+	if (!mime) {
+		wlr_log(WLR_INFO, "primary: Wayland source has no text MIME type");
+		return;
+	}
+	clipboard_clear_read(server);
+	server->clip_read_is_primary = true;
+
+	int fds[2];
+	if (pipe(fds) < 0) {
+		return;
+	}
+	int flags = fcntl(fds[0], F_GETFL, 0);
+	if (flags >= 0) {
+		fcntl(fds[0], F_SETFL, flags | O_NONBLOCK);
+	}
+	server->clip_read_fd = fds[0];
+	server->clip_read_source = wl_event_loop_add_fd(server->loop, fds[0],
+		WL_EVENT_READABLE | WL_EVENT_HANGUP, clipboard_read_fd, server);
+	if (!server->clip_read_source) {
+		close(fds[0]);
+		close(fds[1]);
+		server->clip_read_fd = -1;
+		return;
+	}
+	wlr_primary_selection_source_send(source, mime, fds[1]);
 	close(fds[1]);
 }
 
@@ -2037,6 +2122,44 @@ static void text_source_destroy(struct wlr_data_source *base) {
 static const struct wlr_data_source_impl text_source_impl = {
 	.send = text_source_send,
 	.destroy = text_source_destroy,
+};
+
+struct wlx_pri_source {
+	struct wlr_primary_selection_source base;
+	struct wlx_server *server;
+};
+
+static void pri_source_send(struct wlr_primary_selection_source *base,
+		const char *mime, int fd) {
+	(void)mime;
+	struct wlx_pri_source *ps = wl_container_of(base, ps, base);
+	struct wlx_server *server = ps->server;
+	if (server->pri_in_text && server->pri_in_len > 0) {
+		const char *p = server->pri_in_text;
+		size_t left = server->pri_in_len;
+		while (left > 0) {
+			ssize_t n = write(fd, p, left);
+			if (n < 0) {
+				if (errno == EINTR) {
+					continue;
+				}
+				break;
+			}
+			p += n;
+			left -= (size_t)n;
+		}
+	}
+	close(fd);
+}
+
+static void pri_source_destroy(struct wlr_primary_selection_source *base) {
+	struct wlx_pri_source *ps = wl_container_of(base, ps, base);
+	free(ps);
+}
+
+static const struct wlr_primary_selection_source_impl pri_source_impl = {
+	.send = pri_source_send,
+	.destroy = pri_source_destroy,
 };
 
 static void clipboard_offer_x11_text_to_wayland(struct wlx_server *server,
@@ -2077,18 +2200,56 @@ static void clipboard_offer_x11_text_to_wayland(struct wlx_server *server,
 		len);
 }
 
-static void clipboard_request_from_x11(struct wlx_server *server) {
+static void primary_offer_x11_text_to_wayland(struct wlx_server *server,
+		char *text, size_t len) {
+	free(server->pri_in_text);
+	server->pri_in_text = text;
+	server->pri_in_len = len;
+
+	struct wlx_pri_source *ps = calloc(1, sizeof(*ps));
+	if (!ps) {
+		return;
+	}
+	ps->server = server;
+	wlr_primary_selection_source_init(&ps->base, &pri_source_impl);
+
+	const char *mimes[] = {
+		"text/plain;charset=utf-8",
+		"text/plain",
+	};
+	for (size_t i = 0; i < sizeof(mimes) / sizeof(mimes[0]); i++) {
+		char **slot = wl_array_add(&ps->base.mime_types, sizeof(char *));
+		if (!slot) {
+			wlr_primary_selection_source_destroy(&ps->base);
+			return;
+		}
+		*slot = strdup(mimes[i]);
+		if (!*slot) {
+			wlr_primary_selection_source_destroy(&ps->base);
+			return;
+		}
+	}
+
+	server->pri_setting_from_x11 = true;
+	wlr_seat_set_primary_selection(server->seat, &ps->base,
+		wl_display_next_serial(server->wl_display));
+	server->pri_setting_from_x11 = false;
+	wlr_log(WLR_INFO, "primary: offered X11 PRIMARY to Wayland (%zu bytes)",
+		len);
+}
+
+static void clipboard_request_from_x11(struct wlx_server *server, bool primary) {
 	if (!server->xcb || server->clipboard_window == XCB_WINDOW_NONE) {
 		return;
 	}
-	if (server->clip_we_own_x11) {
+	if (primary ? server->pri_we_own_x11 : server->clip_we_own_x11) {
 		return;
 	}
-	xcb_delete_property(server->xcb, server->clipboard_window,
-		server->atom_wlx_clipboard);
+	xcb_atom_t sel = primary ? server->atom_primary : server->atom_clipboard;
+	xcb_atom_t prop = primary ? server->atom_wlx_primary : server->atom_wlx_clipboard;
+	xcb_delete_property(server->xcb, server->clipboard_window, prop);
 	xcb_convert_selection(server->xcb, server->clipboard_window,
-		server->atom_clipboard, server->atom_utf8_string,
-		server->atom_wlx_clipboard, XCB_CURRENT_TIME);
+		sel, server->atom_utf8_string, prop, XCB_CURRENT_TIME);
 	xcb_flush(server->xcb);
 }
 
@@ -2098,8 +2259,15 @@ static void clipboard_handle_selection_notify(struct wlx_server *server,
 			ev->requestor != server->clipboard_window) {
 		return;
 	}
+	bool primary = (ev->property == server->atom_wlx_primary) ||
+		(ev->selection == server->atom_primary);
+	xcb_atom_t prop = primary ? server->atom_wlx_primary : server->atom_wlx_clipboard;
+	if (ev->property != prop && ev->property != server->atom_wlx_clipboard &&
+			ev->property != server->atom_wlx_primary) {
+		return;
+	}
 	xcb_get_property_cookie_t cookie = xcb_get_property(server->xcb, 0,
-		server->clipboard_window, server->atom_wlx_clipboard,
+		server->clipboard_window, ev->property,
 		XCB_GET_PROPERTY_TYPE_ANY, 0, WLX_CLIPBOARD_MAX / 4);
 	xcb_get_property_reply_t *reply =
 		xcb_get_property_reply(server->xcb, cookie, NULL);
@@ -2127,7 +2295,11 @@ static void clipboard_handle_selection_notify(struct wlx_server *server,
 	memcpy(text, xcb_get_property_value(reply), (size_t)len);
 	text[len] = '\0';
 	free(reply);
-	clipboard_offer_x11_text_to_wayland(server, text, (size_t)len);
+	if (primary) {
+		primary_offer_x11_text_to_wayland(server, text, (size_t)len);
+	} else {
+		clipboard_offer_x11_text_to_wayland(server, text, (size_t)len);
+	}
 }
 
 static void clipboard_handle_selection_request(struct wlx_server *server,
@@ -2143,8 +2315,12 @@ static void clipboard_handle_selection_request(struct wlx_server *server,
 		.property = XCB_ATOM_NONE,
 	};
 
-	if (req->selection != server->atom_clipboard ||
-			!server->clip_out_text) {
+	bool primary = (req->selection == server->atom_primary);
+	bool clipboard = (req->selection == server->atom_clipboard);
+	const char *out = primary ? server->pri_out_text : server->clip_out_text;
+	size_t out_len = primary ? server->pri_out_len : server->clip_out_len;
+
+	if ((!primary && !clipboard) || !out) {
 		xcb_send_event(server->xcb, 0, req->requestor,
 			XCB_EVENT_MASK_NO_EVENT, (const char *)&notify);
 		xcb_flush(server->xcb);
@@ -2168,8 +2344,7 @@ static void clipboard_handle_selection_request(struct wlx_server *server,
 		xcb_atom_t type = (req->target == server->atom_string)
 			? server->atom_string : server->atom_utf8_string;
 		xcb_change_property(server->xcb, XCB_PROP_MODE_REPLACE, req->requestor,
-			req->property, type, 8,
-			(uint32_t)server->clip_out_len, server->clip_out_text);
+			req->property, type, 8, (uint32_t)out_len, out);
 		notify.property = req->property;
 	}
 
@@ -2183,16 +2358,21 @@ static void clipboard_handle_selection_clear(struct wlx_server *server,
 	if (ev->selection == server->atom_clipboard) {
 		server->clip_we_own_x11 = false;
 		wlr_log(WLR_INFO, "clipboard: lost X11 CLIPBOARD ownership");
+	} else if (ev->selection == server->atom_primary) {
+		server->pri_we_own_x11 = false;
+		wlr_log(WLR_INFO, "primary: lost X11 PRIMARY ownership");
 	}
 }
 
 static bool clipboard_init(struct wlx_server *server, xcb_screen_t *screen) {
 	server->clip_read_fd = -1;
 	server->atom_clipboard = intern_atom(server->xcb, "CLIPBOARD");
+	server->atom_primary = intern_atom(server->xcb, "PRIMARY");
 	server->atom_targets = intern_atom(server->xcb, "TARGETS");
 	server->atom_string = intern_atom(server->xcb, "STRING");
 	server->atom_text = intern_atom(server->xcb, "TEXT");
 	server->atom_wlx_clipboard = intern_atom(server->xcb, "_WLX_CLIPBOARD");
+	server->atom_wlx_primary = intern_atom(server->xcb, "_WLX_PRIMARY");
 
 	server->clipboard_window = xcb_generate_id(server->xcb);
 	uint32_t values[] = { XCB_EVENT_MASK_PROPERTY_CHANGE };
@@ -2205,20 +2385,24 @@ static bool clipboard_init(struct wlx_server *server, xcb_screen_t *screen) {
 	if (xfixes && xfixes->present) {
 		server->xfixes_event_base = xfixes->first_event;
 		xcb_xfixes_query_version(server->xcb, 5, 0);
-		xcb_xfixes_select_selection_input(server->xcb, server->clipboard_window,
-			server->atom_clipboard,
+		uint32_t mask =
 			XCB_XFIXES_SELECTION_EVENT_MASK_SET_SELECTION_OWNER |
 			XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_WINDOW_DESTROY |
-			XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE);
+			XCB_XFIXES_SELECTION_EVENT_MASK_SELECTION_CLIENT_CLOSE;
+		xcb_xfixes_select_selection_input(server->xcb, server->clipboard_window,
+			server->atom_clipboard, mask);
+		xcb_xfixes_select_selection_input(server->xcb, server->clipboard_window,
+			server->atom_primary, mask);
 		server->xfixes_ok = true;
-		wlr_log(WLR_INFO, "clipboard: XFixes selection monitoring enabled");
+		wlr_log(WLR_INFO, "clipboard: XFixes monitoring CLIPBOARD+PRIMARY");
 	} else {
 		wlr_log(WLR_ERROR, "clipboard: XFixes unavailable; X11→Wayland paste disabled");
 	}
 	xcb_flush(server->xcb);
 
-	/* If something already owns CLIPBOARD, import it. */
-	clipboard_request_from_x11(server);
+	/* Import whatever the host already has. */
+	clipboard_request_from_x11(server, false);
+	clipboard_request_from_x11(server, true);
 	return true;
 }
 
@@ -2228,6 +2412,10 @@ static void clipboard_finish(struct wlx_server *server) {
 	server->clip_out_text = NULL;
 	free(server->clip_in_text);
 	server->clip_in_text = NULL;
+	free(server->pri_out_text);
+	server->pri_out_text = NULL;
+	free(server->pri_in_text);
+	server->pri_in_text = NULL;
 	if (server->xcb && server->clipboard_window != XCB_WINDOW_NONE) {
 		xcb_destroy_window(server->xcb, server->clipboard_window);
 		server->clipboard_window = XCB_WINDOW_NONE;
@@ -2245,6 +2433,18 @@ static void server_request_set_selection(struct wl_listener *listener, void *dat
 		if (event->source) {
 			clipboard_export_wayland_source(server, event->source);
 		}
+	}
+}
+
+static void server_request_set_primary_selection(struct wl_listener *listener,
+		void *data) {
+	struct wlx_server *server =
+		wl_container_of(listener, server, request_set_primary_selection);
+	struct wlr_seat_request_set_primary_selection_event *event = data;
+	wlr_seat_set_primary_selection(server->seat, event->source, event->serial);
+
+	if (!server->pri_setting_from_x11 && event->source) {
+		primary_export_wayland_source(server, event->source);
 	}
 }
 
@@ -2940,6 +3140,10 @@ int main(int argc, char **argv) {
 	wlr_compositor_create(server.wl_display, 5, server.renderer);
 	wlr_subcompositor_create(server.wl_display);
 	wlr_data_device_manager_create(server.wl_display);
+	/* Optional Wayland protocol (zwp_primary_selection_v1): middle-click
+	 * paste. Many clients still implement it; pure Wayland desktops may
+	 * omit it, but X11 users expect PRIMARY. */
+	wlr_primary_selection_v1_device_manager_create(server.wl_display);
 
 	server.output_layout = wlr_output_layout_create(server.wl_display);
 	server.scene = wlr_scene_create();
@@ -2993,6 +3197,10 @@ int main(int argc, char **argv) {
 	server.request_set_selection.notify = server_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 		&server.request_set_selection);
+	server.request_set_primary_selection.notify =
+		server_request_set_primary_selection;
+	wl_signal_add(&server.seat->events.request_set_primary_selection,
+		&server.request_set_primary_selection);
 	server.request_start_drag.notify = server_request_start_drag;
 	wl_signal_add(&server.seat->events.request_start_drag,
 		&server.request_start_drag);
@@ -3125,6 +3333,7 @@ int main(int argc, char **argv) {
 	wl_list_remove(&server.cursor_frame.link);
 	wl_list_remove(&server.request_set_cursor.link);
 	wl_list_remove(&server.request_set_selection.link);
+	wl_list_remove(&server.request_set_primary_selection.link);
 	wl_list_remove(&server.request_start_drag.link);
 	wl_list_remove(&server.start_drag.link);
 

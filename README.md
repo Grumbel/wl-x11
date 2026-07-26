@@ -89,10 +89,11 @@ one-window-per-toplevel model. Notable things it does **not** do:
   the toplevel's entire visible area *is* the X11 window — there's no
   extra canvas to draw into (unlike Xwayland rootless mode, which gives
   popups their own override-redirect X windows).
-- **Text-only host X11 clipboard bridge.** `text/plain` (and close
-  relatives) is mirrored between this compositor's Wayland seat selection
-  and the host X11 `CLIPBOARD` selection. Images and other MIME types are
-  not bridged; large pastes that require X11 INCR transfers are ignored.
+- **Text-only host X11 clipboard + PRIMARY bridge.** `text/plain` is
+  mirrored between the Wayland seat selection and host `CLIPBOARD`, and
+  between `zwp_primary_selection_v1` and host `PRIMARY` (middle-click).
+  Images and other MIME types are not bridged; large INCR transfers are
+  ignored. PRIMARY is optional on pure Wayland; many toolkits still use it.
 - **Drag-and-drop.** Wayland↔Wayland DnD works via the seat. Bridging to
   host X11 uses XDND for `text/plain` and `text/uri-list` only. Drops from
   X11 onto a nested window are imported into the Wayland selection (paste)
