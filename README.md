@@ -50,7 +50,7 @@ ninja -C build
 
 You need: `meson`, `ninja`, `pkg-config`, `wlroots` (0.18 or 0.19 dev
 headers), `wayland-server`, `wayland-protocols`, `libxkbcommon`, `pixman`,
-`libxcb`.
+`libxcb`, `xcb-xfixes`.
 
 ```sh
 meson setup build
@@ -89,10 +89,10 @@ one-window-per-toplevel model. Notable things it does **not** do:
   the toplevel's entire visible area *is* the X11 window — there's no
   extra canvas to draw into (unlike Xwayland rootless mode, which gives
   popups their own override-redirect X windows).
-- **No host X11 clipboard bridge.** Copy/paste works between Wayland
-  clients of this compositor, but is not synced with X11 applications
-  running directly on the host. That would require an Xwayland-style
-  clipboard proxy.
+- **Text-only host X11 clipboard bridge.** `text/plain` (and close
+  relatives) is mirrored between this compositor's Wayland seat selection
+  and the host X11 `CLIPBOARD` selection. Images and other MIME types are
+  not bridged; large pastes that require X11 INCR transfers are ignored.
 - **Cursor via the X11 backend output-cursor path.** Client
   `wl_pointer.set_cursor` surfaces are forwarded with
   `wlr_cursor_set_surface`; the X11 backend turns them into real X cursors

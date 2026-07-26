@@ -23,6 +23,7 @@ wayland_server = dependency('wayland-server')
 xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 xcb = dependency('xcb')
+xcb_xfixes = dependency('xcb-xfixes')
 
 # wlroots' pkg-config file name is versioned (e.g. wlroots-0.18.pc,
 # wlroots-0.19.pc, ...) and the suffix changes with every wlroots major
@@ -45,6 +46,6 @@ wlroots = dependency(wlroots_name, required: true)
 executable(
   'wl-x11',
   'src/main.c',
-  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb],
+  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_xfixes],
   install: true,
 )
