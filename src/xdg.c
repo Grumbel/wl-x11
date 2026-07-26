@@ -144,6 +144,19 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
+	/* wlr_scene_xdg_surface places the surface tree at (-geometry.x,
+	 * -geometry.y) so geometry sits at the node origin. Correct for
+	 * geometry-sized SSD hosts. With --csd the host is buffer-sized
+	 * (shadow included); force (0,0) so content/damage match the X11
+	 * window. Scene's commit listener is registered first and runs
+	 * before this one. */
+	if (win->server->prefer_csd && win->scene_tree) {
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &win->scene_tree->children, link) {
+			wlr_scene_node_set_position(child, 0, 0);
+		}
+	}
+
 	/* Re-apply pixel scale after the scene helper refreshed buffer dest sizes. */
 	wlx_apply_content_scale(win);
 
