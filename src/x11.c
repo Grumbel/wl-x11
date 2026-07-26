@@ -99,11 +99,6 @@ void xwin_set_class(struct wlx_server *s, xcb_window_t w, const char *app_id) {
 /* existing ConfigureNotify-based resize handling.                      */
 /* ------------------------------------------------------------------- */
 
-enum {
-	_NET_WM_STATE_REMOVE = 0,
-	_NET_WM_STATE_ADD = 1,
-};
-
 void send_root_client_message(struct wlx_server *s, xcb_window_t window,
 		xcb_atom_t type, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3,
 		uint32_t d4) {

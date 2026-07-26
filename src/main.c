@@ -92,14 +92,35 @@ void client_created_notify(struct wl_listener *listener, void *data) {
 
 int main(int argc, char **argv) {
 	bool debug = false;
+	double content_scale = 1.0;
 	char **command_argv = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--debug") == 0) {
 			debug = true;
+		} else if (strcmp(argv[i], "--scale") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "wl-x11: --scale requires a number\n");
+				return 1;
+			}
+			char *end = NULL;
+			content_scale = strtod(argv[++i], &end);
+			if (end == argv[i] || *end != '\0' || content_scale <= 0.0) {
+				fprintf(stderr, "wl-x11: invalid --scale value '%s'\n", argv[i]);
+				return 1;
+			}
+		} else if (strncmp(argv[i], "--scale=", 8) == 0) {
+			char *end = NULL;
+			content_scale = strtod(argv[i] + 8, &end);
+			if (end == argv[i] + 8 || *end != '\0' || content_scale <= 0.0) {
+				fprintf(stderr, "wl-x11: invalid --scale value '%s'\n", argv[i] + 8);
+				return 1;
+			}
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			printf("usage: wl-x11 [--debug] [command [args...]]\n"
+			printf("usage: wl-x11 [--debug] [--scale FACTOR] [command [args...]]\n"
 				"  --debug             print verbose diagnostic logging "
 				"(default: only errors)\n"
+				"  --scale FACTOR      brute-force scale all content pixels "
+				"(e.g. 2, 0.5; default 1)\n"
 				"  command [args...]   also launch this program with "
 				"WAYLAND_DISPLAY set,\n"
 				"                      and shut down once no Wayland "
@@ -130,6 +151,12 @@ int main(int argc, char **argv) {
 	}
 
 	struct wlx_server server = {0};
+	server.content_scale = content_scale;
+	if (server.content_scale != 1.0) {
+		wlr_log(WLR_INFO, "content scale factor %.3f (brute-force pixel scale)",
+			server.content_scale);
+		fprintf(stderr, "wl-x11: content scale %.3f\n", server.content_scale);
+	}
 	server.clip_read_fd = -1;
 	server.wl_display = wl_display_create();
 	struct wl_event_loop *loop = wl_display_get_event_loop(server.wl_display);

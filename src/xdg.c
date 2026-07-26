@@ -73,19 +73,24 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		 * transparent CSD shadow drawn as black without host alpha. */
 		int cw = geo.width;
 		int ch = geo.height;
+		int out_w = wlx_scale_size(win->server, cw);
+		int out_h = wlx_scale_size(win->server, ch);
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
-				(cw != win->output->width || ch != win->output->height)) {
-			wlr_log(WLR_INFO, "fitting X11 window to client geometry %dx%d",
-				cw, ch);
-			resize_output_to(win, cw, ch);
-			wlr_xdg_toplevel_set_size(win->toplevel,
-				win->output->width, win->output->height);
+				(out_w != win->output->width || out_h != win->output->height)) {
+			wlr_log(WLR_INFO, "fitting X11 window to client geometry %dx%d "
+				"(output %dx%d at scale %.2f)",
+				cw, ch, out_w, out_h, win->server->content_scale);
+			resize_output_to(win, out_w, out_h);
+			wlr_xdg_toplevel_set_size(win->toplevel, cw, ch);
 			if (win->l_output) {
 				wlr_scene_node_set_position(&win->scene_tree->node,
 					win->l_output->x, win->l_output->y);
 			}
 		}
 	}
+
+	/* Re-apply pixel scale after the scene helper refreshed buffer dest sizes. */
+	wlx_apply_content_scale(win);
 
 	if (win->xwin == XCB_WINDOW_NONE || !win->toplevel) {
 		return;

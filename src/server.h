@@ -49,6 +49,12 @@
 #define WLX_MIN_WINDOW_SIZE 50
 #define WLX_DRAG_THROTTLE_MS 16
 
+/* EWMH _NET_WM_STATE client-message action codes */
+enum {
+	_NET_WM_STATE_REMOVE = 0,
+	_NET_WM_STATE_ADD = 1,
+};
+
 struct wlx_window;
 struct wlx_keyboard;
 
@@ -82,6 +88,10 @@ struct wlx_server {
 
 	struct wlr_seat *seat;
 	struct wlr_cursor *cursor;
+	/* Compositor-side pixel scale (brute-force). 1.0 = native.
+	 * X11 window size = logical * content_scale; client still sees
+	 * logical size; scene buffers are dest-scaled to fill. */
+	double content_scale;
 	struct wlr_xcursor_manager *cursor_mgr;
 	bool have_keyboard;
 	bool have_pointer;
@@ -390,4 +400,10 @@ void output_frame(struct wl_listener *listener, void *data);
 void output_commit(struct wl_listener *listener, void *data);
 void output_destroy(struct wl_listener *listener, void *data);
 
+int wlx_scale_size(struct wlx_server *server, int logical);
+int wlx_unscale_size(struct wlx_server *server, int output_px);
+void wlx_apply_content_scale(struct wlx_window *win);
+void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy);
+
 #endif /* WLX_SERVER_H */
+

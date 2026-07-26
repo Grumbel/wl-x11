@@ -6,11 +6,88 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/wait.h>
+
+int wlx_scale_size(struct wlx_server *server, int logical) {
+	if (!server || server->content_scale <= 0.0) {
+		return logical;
+	}
+	int v = (int)lround((double)logical * server->content_scale);
+	return v < 1 ? 1 : v;
+}
+
+int wlx_unscale_size(struct wlx_server *server, int output_px) {
+	if (!server || server->content_scale <= 0.0) {
+		return output_px;
+	}
+	int v = (int)lround((double)output_px / server->content_scale);
+	return v < 1 ? 1 : v;
+}
+
+void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy) {
+	if (!server || !sx || !sy || server->content_scale <= 0.0) {
+		return;
+	}
+	if (server->content_scale == 1.0) {
+		return;
+	}
+	*sx /= server->content_scale;
+	*sy /= server->content_scale;
+}
+
+/*
+ * Brute-force pixel scale: enlarge/shrink every scene buffer's destination
+ * rectangle and scale subsurface positions. Clients still allocate logical
+ * buffers; the X11 window is logical*scale. Re-run after each surface commit
+ * because wlr_scene_xdg_surface resets dest size on commit.
+ */
+static void scene_node_apply_scale(struct wlr_scene_node *node, double scale) {
+	if (!node || !node->enabled) {
+		return;
+	}
+	if (node->type == WLR_SCENE_NODE_BUFFER) {
+		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
+		struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(sb);
+		if (ss && ss->surface) {
+			int bw = ss->surface->current.width;
+			int bh = ss->surface->current.height;
+			if (bw > 0 && bh > 0) {
+				wlr_scene_buffer_set_dest_size(sb,
+					(int)lround(bw * scale), (int)lround(bh * scale));
+			}
+		}
+		return;
+	}
+	if (node->type == WLR_SCENE_NODE_TREE) {
+		struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &tree->children, link) {
+			int ox = child->x;
+			int oy = child->y;
+			if (ox != 0 || oy != 0) {
+				wlr_scene_node_set_position(child,
+					(int)lround(ox * scale), (int)lround(oy * scale));
+			}
+			scene_node_apply_scale(child, scale);
+		}
+	}
+}
+
+void wlx_apply_content_scale(struct wlx_window *win) {
+	if (!win || !win->server || !win->scene_tree) {
+		return;
+	}
+	double scale = win->server->content_scale;
+	if (scale <= 0.0 || scale == 1.0) {
+		return;
+	}
+	scene_node_apply_scale(&win->scene_tree->node, scale);
+}
 
 void output_frame(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_frame);
@@ -45,7 +122,10 @@ void output_commit(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
-		wlr_xdg_toplevel_set_size(win->toplevel, w, h);
+		/* Client sees logical size; host window is scaled pixels. */
+		int lw = wlx_unscale_size(win->server, w);
+		int lh = wlx_unscale_size(win->server, h);
+		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
 	}
 }
 
@@ -371,6 +451,12 @@ void create_output_for_window(struct wlx_window *win) {
 	 * transient dialogs are not forced into the desktop default size. */
 	int want_w = 0, want_h = 0;
 	toplevel_preferred_size(win, &want_w, &want_h);
+	/* Host window is logical geometry scaled by content_scale. */
+	{
+		int logical_w = want_w, logical_h = want_h;
+		want_w = wlx_scale_size(server, logical_w);
+		want_h = wlx_scale_size(server, logical_h);
+	}
 
 	struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
 	if (mode && want_w == WLX_DEFAULT_WIDTH && want_h == WLX_DEFAULT_HEIGHT) {
@@ -492,7 +578,10 @@ void create_output_for_window(struct wlx_window *win) {
 	win->output_request_state.notify = output_request_state;
 	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
-	wlr_xdg_toplevel_set_size(win->toplevel, output->width, output->height);
+	wlr_xdg_toplevel_set_size(win->toplevel,
+		wlx_unscale_size(server, output->width),
+		wlx_unscale_size(server, output->height));
+	wlx_apply_content_scale(win);
 
 	/* First frame only after position/hints are applied. */
 	wlr_output_schedule_frame(output);

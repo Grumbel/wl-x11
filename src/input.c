@@ -159,6 +159,7 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		struct wlx_window *under = window_at_root_pointer(server);
 		if (under && under->toplevel &&
 				pointer_coords_on_window(server, under, &sx, &sy)) {
+			wlx_pointer_to_surface(server, &sx, &sy);
 			surface = under->toplevel->base->surface;
 		}
 	}
@@ -232,6 +233,7 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 
 		if (win && win->toplevel &&
 				pointer_coords_on_window(server, win, &sx, &sy)) {
+			wlx_pointer_to_surface(server, &sx, &sy);
 			surface = win->toplevel->base->surface;
 			set_active_window(server, win);
 			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
