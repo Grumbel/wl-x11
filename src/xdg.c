@@ -335,14 +335,14 @@ void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 /* ------------------------------------------------------------------- */
 
 static struct wlx_window *popup_find_toplevel_window(struct wlr_xdg_popup *popup) {
-	struct wlr_xdg_surface *parent = popup->parent;
+       struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(popup->parent);
 	while (parent) {
 		if (parent->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL && parent->data) {
 			return parent->data;
 		}
 		if (parent->role == WLR_XDG_SURFACE_ROLE_POPUP && parent->popup) {
-			parent = parent->popup->parent;
-			continue;
+                  parent = wlr_xdg_surface_try_from_wlr_surface(parent->popup->parent);
+                  continue;
 		}
 		break;
 	}
