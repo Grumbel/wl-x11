@@ -207,8 +207,6 @@ bool query_root_pointer_position(struct wlx_server *s, int16_t *x, int16_t *y) {
 	return true;
 }
 
-#define WLX_DRAG_THROTTLE_MS 16
-
 /* ICCCM ConfigureRequest target: the real client window, not the WM
  * frame. The WM intercepts the request and moves/resizes the frame.
  * Falls back to xwin when content is unknown. */
@@ -343,7 +341,7 @@ xcb_window_t find_content_window(struct wlx_server *server, struct wlx_window *w
 	return best;
 }
 
-/* Earlier versions of this file tried to detect X11-driven resizes
+/* Earlier versions tried to detect X11-driven resizes
  * ourselves, via our own auxiliary XCB connection watching
  * ConfigureNotify on what we assumed was "the" window. Reading wlroots'
  * actual X11 backend source (backend/x11/output.c) revealed why that was
@@ -382,8 +380,8 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	/* Host WM or user resized the X11 window — stop auto-fitting to
 	 * client geometry on subsequent commits. */
 	win->size_from_wm = true;
-	/* output_commit() (below) fires synchronously as part of this call
-	 * and handles diffing the new size against what we last told the
+	/* output_commit() fires synchronously as part of this call and
+	 * handles diffing the new size against what we last told the
 	 * toplevel and forwarding it if different -- nothing further needed
 	 * here. */
 	wlr_output_commit_state(win->output, event->state);

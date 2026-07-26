@@ -134,11 +134,10 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	/* All of our own diagnostic wlr_log(WLR_INFO, ...) calls throughout
-	 * this file are gated by this: at the default WLR_ERROR level they
-	 * simply won't print, leaving only genuine errors (and whatever
-	 * wlroots itself logs at WLR_ERROR) on stderr. --debug raises it
-	 * back to WLR_INFO to see everything. */
+	/* Diagnostic wlr_log(WLR_INFO, ...) calls are gated by this: at the
+	 * default WLR_ERROR level they simply won't print, leaving only
+	 * genuine errors (and whatever wlroots itself logs at WLR_ERROR) on
+	 * stderr. --debug raises it back to WLR_INFO to see everything. */
 	wlr_log_init(debug ? WLR_INFO : WLR_ERROR, NULL);
 
 	const char *x11_display = getenv("DISPLAY");

@@ -169,10 +169,6 @@ void output_destroy(struct wl_listener *listener, void *data) {
 	}
 }
 
-#define WLX_DEFAULT_WIDTH 1024
-#define WLX_DEFAULT_HEIGHT 720
-#define WLX_MIN_OUTPUT_SIZE 32
-
 /* Preferred size: xdg window geometry first (excludes client-side shadow /
  * transparent padding that would otherwise show as black without RGBA
  * compositing), then surface buffer size, then the compositor default. */
@@ -586,9 +582,3 @@ void create_output_for_window(struct wlx_window *win) {
 	/* First frame only after position/hints are applied. */
 	wlr_output_schedule_frame(output);
 }
-
-
-/* ------------------------------------------------------------------- */
-/* xdg-shell toplevel lifecycle                                         */
-/* ------------------------------------------------------------------- */
-

@@ -168,18 +168,3 @@ void toplevel_request_minimize(struct wl_listener *listener, void *data) {
 	send_root_client_message(win->server, target,
 		win->server->atom_wm_change_state, 3 /* IconicState */, 0, 0, 0, 0);
 }
-
-/* Many clients (particularly GL/EGL ones, which foot and weston-terminal
- * both are) render into a child window distinct from the top-level window
- * the WM manages -- the one we find via the root-children diff in
- * create_output_for_window() is only that top-level window. X11 resolves
- * both the displayed cursor and (more importantly) input focus from the
- * actual window under the pointer / holding focus, which may be such a
- * child, not the top-level frame. See register_x11_window_subtree() below,
- * which walks the whole subtree once we know the WM/X11 machinery
- * involved here uses child windows for these clients. */
-
-/* ------------------------------------------------------------------- */
-/* Output (== one X11 window) lifecycle                                 */
-/* ------------------------------------------------------------------- */
-

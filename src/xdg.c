@@ -252,8 +252,3 @@ void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 
 	wl_list_insert(&server->windows, &win->link);
 }
-
-/* ------------------------------------------------------------------- */
-/* Input                                                                 */
-/* ------------------------------------------------------------------- */
-

@@ -42,8 +42,6 @@ bool drag_throttle_ready(struct wlx_server *server) {
 	return true;
 }
 
-#define WLX_MIN_WINDOW_SIZE 50
-
 /* Called whenever we get any pointer motion at all while a drag is
  * active; throttled to avoid flooding xfwm4's asynchronous
  * ConfigureRequest handling with one call per raw motion event. Always
@@ -351,8 +349,3 @@ void server_new_input(struct wl_listener *listener, void *data) {
 	}
 	wlr_seat_set_capabilities(server->seat, caps);
 }
-
-/* ------------------------------------------------------------------- */
-/* Text-only CLIPBOARD bridge (Wayland ↔ host X11)                      */
-/* ------------------------------------------------------------------- */
-
