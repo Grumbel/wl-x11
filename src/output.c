@@ -549,6 +549,10 @@ void create_output_for_window(struct wlx_window *win) {
 		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
+		/* --csd: strip host title/border so the client draws chrome. */
+		if (server->prefer_csd) {
+			xwin_set_motif_decorations(server, win->xwin, false);
+		}
 		/* Size hints before MapWindow (no position flags). last_* not set
 		 * yet — pass preferred size via a temporary so win_sync works. */
 		win->last_output_width = want_w > 0 ? want_w : output->width;
@@ -566,6 +570,9 @@ void create_output_for_window(struct wlx_window *win) {
 			apply_transient_hints(win);
 			xwin_set_title(server, win->content_xwin, win->toplevel->title);
 			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
+			if (server->prefer_csd) {
+				xwin_set_motif_decorations(server, win->content_xwin, false);
+			}
 			win_sync_size_hints(win);
 			dnd_set_xdnd_aware(server, win->content_xwin);
 			if (server->xcb) {

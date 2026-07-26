@@ -92,6 +92,9 @@ struct wlx_server {
 	 * X11 window size = logical * content_scale; client still sees
 	 * logical size; scene buffers are dest-scaled to fill. */
 	double content_scale;
+	/* When true: ask clients for CSD and strip host WM decorations
+	 * (_MOTIF_WM_HINTS decorations=0). Default is SSD via the host WM. */
+	bool prefer_csd;
 	struct wlr_xcursor_manager *cursor_mgr;
 	bool have_keyboard;
 	bool have_pointer;
@@ -181,6 +184,7 @@ struct wlx_server {
 	xcb_atom_t atom_wm_transient_for;
 	xcb_atom_t atom_wm_normal_hints;
 	xcb_atom_t atom_wm_size_hints;
+	xcb_atom_t atom_motif_wm_hints;
 	xcb_atom_t atom_net_wm_window_type;
 	xcb_atom_t atom_net_wm_window_type_normal;
 	xcb_atom_t atom_net_wm_window_type_dialog;
@@ -344,6 +348,9 @@ void apply_transient_hints(struct wlx_window *win);
 void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w, xcb_window_t parent);
 void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w, bool dialog);
 void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal);
+/* decorations=false → Motif decorations=0 (no host border/title). */
+void xwin_set_motif_decorations(struct wlx_server *s, xcb_window_t w,
+	bool decorations);
 void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
 	int width, int height, int min_width, int min_height,
 	int max_width, int max_height);

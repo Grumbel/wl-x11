@@ -61,8 +61,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	if (win->pending_decoration) {
 		struct wlr_xdg_toplevel_decoration_v1 *decoration = win->pending_decoration;
 		win->pending_decoration = NULL;
-		wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
-			WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+		enum wlr_xdg_toplevel_decoration_v1_mode mode = win->server->prefer_csd
+			? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+			: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+		wlr_xdg_toplevel_decoration_v1_set_mode(decoration, mode);
 	}
 
 	/* Fit the X11 window to the client's geometry until the WM/user
@@ -153,26 +155,20 @@ struct wlx_decoration {
 void decoration_request_mode(struct wl_listener *listener, void *data) {
 	(void)listener;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	/* Always force server-side: each toplevel is a real host-WM-managed
-	 * X11 window, so client-drawn CSD is redundant chrome whose buttons
-	 * only reach us via relayed X11 messages that not every WM honors
-	 * the same way -- the host WM's own title bar works natively and
-	 * bypasses us entirely.
+	/* Default: server-side (host WM draws the border). With --csd: client
+	 * side, and _MOTIF_WM_HINTS strips the host chrome.
 	 *
-	 * xdg-decoration objects can legitimately be created (and its mode
-	 * requested) before the toplevel's surface has had its first commit
-	 * -- version 1 of the protocol actually requires this. Calling
-	 * set_mode() (which schedules a configure) before that first commit
-	 * trips the same "surface->initialized" assertion inside wlroots
-	 * that calling wlr_xdg_surface_schedule_configure() too early does
-	 * (see surface_commit() below) -- so defer it the same way. */
+	 * xdg-decoration can be created before the first surface commit;
+	 * set_mode schedules a configure and must wait until initialized. */
 	struct wlx_window *win = decoration->toplevel->base->data;
 	if (win && !win->initial_configure_sent) {
 		win->pending_decoration = decoration;
 		return;
 	}
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
-		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	bool csd = win && win->server && win->server->prefer_csd;
+	wlr_xdg_toplevel_decoration_v1_set_mode(decoration, csd
+		? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+		: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }
 
 void decoration_destroy(struct wl_listener *listener, void *data) {
@@ -205,15 +201,18 @@ void server_new_toplevel_decoration(struct wl_listener *listener, void *data) {
 	deco->destroy.notify = decoration_destroy;
 	wl_signal_add(&decoration->events.destroy, &deco->destroy);
 
-	wlr_log(WLR_INFO, "new xdg toplevel decoration object -> forcing server-side mode");
-
 	struct wlx_window *win = decoration->toplevel->base->data;
+	bool csd = win && win->server && win->server->prefer_csd;
+	wlr_log(WLR_INFO, "new xdg toplevel decoration -> %s mode",
+		csd ? "client-side" : "server-side");
+
 	if (win && !win->initial_configure_sent) {
 		win->pending_decoration = decoration;
 		return;
 	}
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
-		WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	wlr_xdg_toplevel_decoration_v1_set_mode(decoration, csd
+		? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+		: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }
 
 void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {

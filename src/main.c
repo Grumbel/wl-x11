@@ -92,11 +92,14 @@ void client_created_notify(struct wl_listener *listener, void *data) {
 
 int main(int argc, char **argv) {
 	bool debug = false;
+	bool prefer_csd = false;
 	double content_scale = 1.0;
 	char **command_argv = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--debug") == 0) {
 			debug = true;
+		} else if (strcmp(argv[i], "--csd") == 0) {
+			prefer_csd = true;
 		} else if (strcmp(argv[i], "--scale") == 0) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "wl-x11: --scale requires a number\n");
@@ -116,9 +119,12 @@ int main(int argc, char **argv) {
 				return 1;
 			}
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			printf("usage: wl-x11 [--debug] [--scale FACTOR] [command [args...]]\n"
+			printf("usage: wl-x11 [--debug] [--csd] [--scale FACTOR] [command [args...]]\n"
 				"  --debug             print verbose diagnostic logging "
 				"(default: only errors)\n"
+				"  --csd               client-side decorations: no host WM "
+				"border/title;\n"
+				"                      Wayland clients draw their own chrome\n"
 				"  --scale FACTOR      brute-force scale all content pixels "
 				"(e.g. 2, 0.5; default 1)\n"
 				"  command [args...]   also launch this program with "
@@ -151,10 +157,15 @@ int main(int argc, char **argv) {
 
 	struct wlx_server server = {0};
 	server.content_scale = content_scale;
+	server.prefer_csd = prefer_csd;
 	if (server.content_scale != 1.0) {
 		wlr_log(WLR_INFO, "content scale factor %.3f (brute-force pixel scale)",
 			server.content_scale);
 		fprintf(stderr, "wl-x11: content scale %.3f\n", server.content_scale);
+	}
+	if (server.prefer_csd) {
+		wlr_log(WLR_INFO, "prefer client-side decorations (--csd)");
+		fprintf(stderr, "wl-x11: client-side decorations (no host WM border)\n");
 	}
 	server.clip_read_fd = -1;
 	server.wl_display = wl_display_create();
@@ -277,6 +288,7 @@ int main(int argc, char **argv) {
 		server.atom_wm_transient_for = intern_atom(server.xcb, "WM_TRANSIENT_FOR");
 		server.atom_wm_normal_hints = intern_atom(server.xcb, "WM_NORMAL_HINTS");
 		server.atom_wm_size_hints = intern_atom(server.xcb, "WM_SIZE_HINTS");
+		server.atom_motif_wm_hints = intern_atom(server.xcb, "_MOTIF_WM_HINTS");
 		server.atom_net_wm_window_type =
 			intern_atom(server.xcb, "_NET_WM_WINDOW_TYPE");
 		server.atom_net_wm_window_type_normal =

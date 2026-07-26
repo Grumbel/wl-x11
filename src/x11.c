@@ -86,6 +86,23 @@ void xwin_set_class(struct wlx_server *s, xcb_window_t w, const char *app_id) {
 	xcb_flush(s->xcb);
 }
 
+/* Motif WM hints: control host decorations. decorations=false clears
+ * the decorations field so xfwm4/others draw no title bar or border. */
+void xwin_set_motif_decorations(struct wlx_server *s, xcb_window_t w,
+		bool decorations) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE ||
+			s->atom_motif_wm_hints == XCB_ATOM_NONE) {
+		return;
+	}
+	/* struct { flags, functions, decorations, input_mode, status } */
+	uint32_t hints[5] = {0};
+	hints[0] = 1u << 1; /* MWM_HINTS_DECORATIONS */
+	hints[2] = decorations ? (1u << 0) /* MWM_DECOR_ALL */ : 0;
+	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
+		s->atom_motif_wm_hints, s->atom_motif_wm_hints, 32, 5, hints);
+	xcb_flush(s->xcb);
+}
+
 /* ------------------------------------------------------------------- */
 /* CSD button plumbing: move/resize/maximize/minimize/fullscreen        */
 /*                                                                      */
@@ -592,6 +609,13 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				dnd_set_xdnd_aware(server, win->xwin);
 				dnd_set_xdnd_aware(server, win->content_xwin);
 				apply_transient_hints(win);
+				if (server->prefer_csd) {
+					xwin_set_motif_decorations(server, win->xwin, false);
+					if (win->content_xwin != XCB_WINDOW_NONE) {
+						xwin_set_motif_decorations(server,
+							win->content_xwin, false);
+					}
+				}
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
 			/* Learn the WM's systematic position discrepancy from real
