@@ -29,6 +29,8 @@ int wlx_unscale_size(struct wlx_server *server, int output_px) {
 	return v < 1 ? 1 : v;
 }
 
+/* Convert host/output pixel coords (or scaled scene dest coords) into
+ * surface-local logical coordinates for wl_pointer events. */
 void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy) {
 	if (!server || !sx || !sy || server->content_scale <= 0.0) {
 		return;
