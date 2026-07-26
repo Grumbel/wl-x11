@@ -1228,7 +1228,6 @@ static void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w,
 	}
 	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
 		s->atom_wm_transient_for, XCB_ATOM_WINDOW, 32, 1, &parent);
-	xcb_flush(s->xcb);
 }
 
 static void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w,
@@ -1245,7 +1244,6 @@ static void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w,
 	}
 	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
 		s->atom_net_wm_window_type, XCB_ATOM_ATOM, 32, 1, &type);
-	xcb_flush(s->xcb);
 }
 
 static void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal) {
@@ -1258,7 +1256,6 @@ static void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal) {
 			s->atom_net_wm_state, XCB_ATOM_ATOM, 32, 1,
 			&s->atom_net_wm_state_modal);
 	}
-	xcb_flush(s->xcb);
 }
 
 /* Apply ICCCM/EWMH transient + dialog hints so the host WM places this
@@ -1322,11 +1319,13 @@ static void apply_transient_hints(struct wlx_window *win) {
 			uint32_t values[2] = { (uint32_t)nx, (uint32_t)ny };
 			xcb_configure_window(server->xcb, cfg,
 				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
-			xcb_flush(server->xcb);
 		}
 	} else {
 		xwin_set_window_type_dialog(server, win->xwin, false);
 		xwin_set_window_type_dialog(server, win->content_xwin, false);
+	}
+	if (server->xcb) {
+		xcb_flush(server->xcb);
 	}
 }
 
@@ -1494,38 +1493,12 @@ static void create_output_for_window(struct wlx_window *win) {
 	win->last_output_width = output->width;
 	win->last_output_height = output->height;
 
-	/* Kick off the first frame explicitly; some backends (X11 included)
-	 * don't render anything until a frame is scheduled at least once. */
-	wlr_output_schedule_frame(output);
-
-	win->l_output = wlr_output_layout_add_auto(server->output_layout, output);
-	win->scene_output = wlr_scene_output_create(server->scene, output);
-	wlr_scene_output_layout_add_output(server->scene_layout, win->l_output,
-		win->scene_output);
-
-	/* Place this toplevel's scene subtree at the output's slot in our
-	 * internal (otherwise meaningless) layout, so it renders to fill
-	 * exactly that output/X11 window. */
-	wlr_scene_node_set_position(&win->scene_tree->node,
-		win->l_output->x, win->l_output->y);
-
-	win->output_frame.notify = output_frame;
-	wl_signal_add(&output->events.frame, &win->output_frame);
-	win->output_destroy.notify = output_destroy;
-	wl_signal_add(&output->events.destroy, &win->output_destroy);
-	win->output_commit.notify = output_commit;
-	wl_signal_add(&output->events.commit, &win->output_commit);
-	win->output_request_state.notify = output_request_state;
-	wl_signal_add(&output->events.request_state, &win->output_request_state);
-
-	/* Confirm the size we committed; if we matched client geometry this
-	 * is a no-op for the client, otherwise it learns the default. */
-	wlr_xdg_toplevel_set_size(win->toplevel, output->width, output->height);
-
-	/* Best-effort: find the xcb_window_t the backend just created so we
-	 * can set WM_NAME / WM_CLASS on it. Prefer a newly appeared root
-	 * child whose size matches the output we just committed — reduces
-	 * mis-attribution when several toplevels map concurrently. */
+	/* Resolve X window ID and apply transient position/hints *before*
+	 * scheduling the first frame, so the window is not painted at 0,0
+	 * and then jumped. */
+	if (server->xcb) {
+		xcb_flush(server->xcb);
+	}
 	xcb_roundtrip(server->xcb);
 	xcb_window_t *after = NULL;
 	int after_n = 0;
@@ -1565,25 +1538,35 @@ static void create_output_for_window(struct wlx_window *win) {
 	if (win->xwin != XCB_WINDOW_NONE) {
 		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
 			win->xwin);
-		register_x11_window_subtree(win, win->xwin);
-		win->content_xwin = find_content_window(server, win);
-		/* Before the WM reparents, the root child *is* the client
-		 * window — treat it as content so EWMH/configure have a valid
-		 * target. ReparentNotify will refresh this later. */
-		if (win->content_xwin == XCB_WINDOW_NONE) {
-			win->content_xwin = win->xwin;
+		win->content_xwin = win->xwin;
+		win->related_count = 0;
+		memset(win->related, 0, sizeof(win->related));
+		if (win->related_count < WLX_MAX_RELATED_WINDOWS) {
+			win->related[win->related_count++] = win->xwin;
 		}
-		/* Set on both: the frame (win->xwin), since that's what xfwm4
-		 * appears to actually display, and the content window (the
-		 * correct ICCCM target), for robustness across other WMs/tools
-		 * that read WM_NAME from the real client window instead. */
+
+		/* Hints + position before any frame (and before slow subtree walk). */
+		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
-		xwin_set_title(server, win->content_xwin, win->toplevel->title);
-		xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
 		dnd_set_xdnd_aware(server, win->xwin);
-		dnd_set_xdnd_aware(server, win->content_xwin);
-		apply_transient_hints(win);
+		if (server->xcb) {
+			xcb_flush(server->xcb);
+		}
+
+		register_x11_window_subtree(win, win->xwin);
+		xcb_window_t found = find_content_window(server, win);
+		if (found != XCB_WINDOW_NONE) {
+			win->content_xwin = found;
+			apply_transient_hints(win);
+			xwin_set_title(server, win->content_xwin, win->toplevel->title);
+			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
+			dnd_set_xdnd_aware(server, win->content_xwin);
+			if (server->xcb) {
+				xcb_flush(server->xcb);
+			}
+		}
+
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
 			win->toplevel->title ? win->toplevel->title : "");
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s",
@@ -1592,7 +1575,29 @@ static void create_output_for_window(struct wlx_window *win) {
 		wlr_log(WLR_INFO, "could not resolve backing X11 window id "
 			"(title/class won't be synced, window should still be visible)");
 	}
+
+	win->l_output = wlr_output_layout_add_auto(server->output_layout, output);
+	win->scene_output = wlr_scene_output_create(server->scene, output);
+	wlr_scene_output_layout_add_output(server->scene_layout, win->l_output,
+		win->scene_output);
+	wlr_scene_node_set_position(&win->scene_tree->node,
+		win->l_output->x, win->l_output->y);
+
+	win->output_frame.notify = output_frame;
+	wl_signal_add(&output->events.frame, &win->output_frame);
+	win->output_destroy.notify = output_destroy;
+	wl_signal_add(&output->events.destroy, &win->output_destroy);
+	win->output_commit.notify = output_commit;
+	wl_signal_add(&output->events.commit, &win->output_commit);
+	win->output_request_state.notify = output_request_state;
+	wl_signal_add(&output->events.request_state, &win->output_request_state);
+
+	wlr_xdg_toplevel_set_size(win->toplevel, output->width, output->height);
+
+	/* First frame only after position/hints are applied. */
+	wlr_output_schedule_frame(output);
 }
+
 
 /* ------------------------------------------------------------------- */
 /* xdg-shell toplevel lifecycle                                         */
