@@ -25,11 +25,30 @@ pixman = dependency('pixman-1')
 xcb = dependency('xcb')
 xcb_xfixes = dependency('xcb-xfixes')
 
-# Prefer vendored subprojects/wlroots so backend/x11 is editable in-tree.
-# (force_fallback_for is a meson *CLI* option, not a project() keyword.)
-# Explicit subproject() always wins when the directory exists.
-fs = import('fs')
-if fs.is_dir('subprojects/wlroots')
+# Prefer an already-built wlroots from pkg-config (Nix package or
+# `ninja -C subprojects/wlroots/build install`). Fall back to the in-tree
+# subproject for plain meson builds that have not installed it.
+pkgconfig_bin = find_program('pkg-config')
+wlroots_name = 'wlroots'
+list_result = run_command(pkgconfig_bin, '--list-all', check: false)
+if list_result.returncode() == 0
+  foreach line : list_result.stdout().strip().split('\n')
+    fields = line.strip().split(' ')
+    if fields.length() > 0 and fields[0].startswith('wlroots')
+      wlroots_name = fields[0]
+    endif
+  endforeach
+endif
+
+wlroots = dependency(wlroots_name, required: false)
+if wlroots.found()
+  message('using installed wlroots: ' + wlroots_name)
+else
+  fs = import('fs')
+  if not fs.is_dir('subprojects/wlroots')
+    error('wlroots not found via pkg-config and subprojects/wlroots is missing')
+  endif
+  message('using vendored subprojects/wlroots')
   wlroots_proj = subproject(
     'wlroots',
     default_options: [
@@ -37,25 +56,13 @@ if fs.is_dir('subprojects/wlroots')
       'tests=false',
       'backends=x11',
       'session=disabled',
+      'xwayland=disabled',
+      'renderers=gles2',
+      'allocators=gbm',
+      'color-management=disabled',
     ],
   )
   wlroots = wlroots_proj.get_variable('wlroots')
-  message('using vendored subprojects/wlroots')
-else
-  # Fall back to system wlroots-*.pc
-  pkgconfig_bin = find_program('pkg-config')
-  wlroots_name = 'wlroots'
-  list_result = run_command(pkgconfig_bin, '--list-all', check: false)
-  if list_result.returncode() == 0
-    foreach line : list_result.stdout().strip().split('\n')
-      fields = line.strip().split(' ')
-      if fields.length() > 0 and fields[0].startswith('wlroots')
-        wlroots_name = fields[0]
-      endif
-    endforeach
-  endif
-  message('using system wlroots pkg-config name: ' + wlroots_name)
-  wlroots = dependency(wlroots_name, required: true)
 endif
 
 wlx_src = files(

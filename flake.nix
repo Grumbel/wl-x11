@@ -12,10 +12,9 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+        inherit (pkgs) lib;
 
-        # Same set nixpkgs uses for pkgs.wlroots, minus libinput/seatd/vulkan/
-        # xwayland (disabled via mesonFlags). Attribute names match
-        # pkgs/development/libraries/wlroots/default.nix on nixos-unstable.
+        # Shared deps for building our patched wlroots (X11 backend only).
         wlrootsBuildInputs = with pkgs; [
           wayland
           wayland-protocols
@@ -26,20 +25,18 @@
           libgbm
           libx11
           libxcb
-          # These may be named libxcb-* or xorg.xcbutil* depending on pin;
-          # try the names from current nixpkgs wlroots package first.
           libxcb-wm
           libxcb-render-util
           libxcb-image
           libxcb-errors
-          lcms2
         ];
-      in
-      {
-        packages.default = pkgs.stdenv.mkDerivation {
-          pname = "wl-x11";
-          version = "0.1.0";
-          src = ./.;
+
+        # Separate derivation so edits to compositor src/*.c do not rebuild
+        # the whole of wlroots. Only changes under subprojects/wlroots/ do.
+        wlroots = pkgs.stdenv.mkDerivation {
+          pname = "wlroots-wl-x11";
+          version = "0.21.0-dev";
+          src = ./subprojects/wlroots;
 
           nativeBuildInputs = with pkgs; [
             meson
@@ -51,16 +48,49 @@
           buildInputs = wlrootsBuildInputs;
 
           mesonFlags = [
-            "-Dwlroots:backends=x11"
-            "-Dwlroots:session=disabled"
-            "-Dwlroots:examples=false"
-            "-Dwlroots:tests=false"
-            "-Dwlroots:xwayland=disabled"
-            "-Dwlroots:renderers=gles2"
-            "-Dwlroots:color-management=disabled"
+            "-Dbackends=x11"
+            "-Dsession=disabled"
+            "-Dexamples=false"
+            "-Dtests=false"
+            "-Dxwayland=disabled"
+            "-Drenderers=gles2"
+            "-Dallocators=gbm"
+            "-Dcolor-management=disabled"
+            # Do not set auto_features=disabled: that empties allocators=auto
+            # and leaves no buffer allocator at runtime.
           ];
 
-          meta = with pkgs.lib; {
+          # Consumers need the .pc and headers at build time.
+          # meson installs libwlroots-0.21.so + wlroots-0.21.pc by default.
+        };
+
+        # Compositor sources without the heavy subproject tree so the
+        # derivation hash only changes when compositor files change.
+        wlX11Src = lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            let base = baseNameOf path; in
+            # Drop the vendored tree (built as packages.wlroots) and VCS noise.
+            !(lib.hasInfix "/subprojects/" path)
+            && base != ".git"
+            && base != "result"
+            && base != "build";
+        };
+
+        wl-x11 = pkgs.stdenv.mkDerivation {
+          pname = "wl-x11";
+          version = "0.1.0";
+          src = wlX11Src;
+
+          nativeBuildInputs = with pkgs; [
+            meson
+            ninja
+            pkg-config
+          ];
+
+          buildInputs = wlrootsBuildInputs ++ [ wlroots ];
+
+          meta = with lib; {
             description = "Minimal wlroots-based Wayland compositor nested in X11, one X11 window per Wayland toplevel";
             homepage = "https://example.invalid/wl-x11";
             license = licenses.gpl3Plus;
@@ -68,15 +98,21 @@
             mainProgram = "wl-x11";
           };
         };
+      in
+      {
+        packages = {
+          default = wl-x11;
+          inherit wl-x11 wlroots;
+        };
 
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/wl-x11";
+          program = "${wl-x11}/bin/wl-x11";
         };
 
         checks.reuse = pkgs.runCommand "wl-x11-reuse-lint" {
           nativeBuildInputs = [ pkgs.reuse ];
-          src = ./.;
+          src = wlX11Src;
         } ''
           cp -r "$src" ./src
           chmod -R u+w ./src
@@ -94,11 +130,16 @@
             gdb
             reuse
           ];
-          buildInputs = wlrootsBuildInputs;
+          # Provide the prebuilt patched wlroots so local meson setup
+          # picks it up via pkg-config instead of rebuilding the subproject.
+          buildInputs = wlrootsBuildInputs ++ [ wlroots ];
 
           shellHook = ''
-            echo "wl-x11 dev shell (vendored subprojects/wlroots)."
-            echo "See flake.nix mesonFlags for suggested -Dwlroots:* options."
+            echo "wl-x11 dev shell."
+            echo "  packages.wlroots = patched X11-only wlroots (cached separately)"
+            echo "  packages.wl-x11   = compositor only"
+            echo "Build compositor: meson setup build && ninja -C build"
+            echo "Rebuild wlroots:  nix build .#wlroots"
           '';
         };
       });
