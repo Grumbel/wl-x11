@@ -43,9 +43,20 @@ endif
 message('using wlroots pkg-config name: ' + wlroots_name)
 wlroots = dependency(wlroots_name, required: true)
 
+wlx_src = files(
+  'src/main.c',
+  'src/x11.c',
+  'src/move_resize.c',
+  'src/output.c',
+  'src/xdg.c',
+  'src/input.c',
+  'src/clipboard.c',
+  'src/dnd.c',
+)
+
 executable(
   'wl-x11',
-  'src/main.c',
+  wlx_src,
   dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_xfixes],
   install: true,
 )
