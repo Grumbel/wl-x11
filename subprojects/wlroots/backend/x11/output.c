@@ -414,8 +414,8 @@ static bool output_commit(struct wlr_output *wlr_output,
 
 	/* Apply size before MapWindow so the host WM's MapRequest sees the
 	 * real client geometry (mouse/center placement uses the mapped size).
-	 * Mapping first at the backend default (1024x768) and resizing after
-	 * leaves the frame anchored where a large window was placed. */
+	 * Mapping first at the create-time placeholder and resizing after
+	 * leaves the frame anchored where that placeholder was placed. */
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
 		if (!output_set_custom_mode(wlr_output,
 				state->custom_mode.width,
@@ -608,9 +608,13 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 
 	struct wlr_output *wlr_output = &output->wlr_output;
 
+	/* Placeholder size only. Rootless compositors commit the real client
+	 * geometry (MODE) before MapWindow; a large default caused the host WM
+	 * to place a 1024x768 frame under the pointer, then leave the top-left
+	 * anchored after a shrink. 1x1 is a valid unmapped X geometry. */
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
-	wlr_output_state_set_custom_mode(&state, 1024, 768, 0);
+	wlr_output_state_set_custom_mode(&state, 1, 1, 0);
 
 	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->event_loop, &state);
 	wlr_output_state_finish(&state);
@@ -651,22 +655,10 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	output->win_width = wlr_output->width;
 	output->win_height = wlr_output->height;
 
-	/* ICCCM WM_NORMAL_HINTS: size only. Omitting USPosition and PPosition
-	 * is what tells the window manager it may place the window itself. */
-	if (x11->atoms.wm_normal_hints != XCB_ATOM_NONE &&
-			x11->atoms.wm_size_hints != XCB_ATOM_NONE) {
-		/* Layout matches xcb_size_hints_t / XSizeHints (18 × int32). */
-		int32_t hints[18] = {0};
-		/* PSize | PMinSize only (bits 3 and 4). */
-		hints[0] = (1 << 3) | (1 << 4);
-		hints[3] = (int32_t)wlr_output->width;
-		hints[4] = (int32_t)wlr_output->height;
-		hints[5] = 1;
-		hints[6] = 1;
-		xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, output->win,
-			x11->atoms.wm_normal_hints, x11->atoms.wm_size_hints,
-			32, 18, hints);
-	}
+	/* Do not set WM_NORMAL_HINTS here. Rootless compositors own size/min/max
+	 * hints and write them on the window from
+	 * wlr_x11_output_get_window() before map, with the real client size.
+	 * A placeholder 1x1 PSize would only mislead the host WM. */
 
 	struct {
 		xcb_input_event_mask_t head;

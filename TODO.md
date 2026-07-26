@@ -47,16 +47,6 @@ useful steps:
 - Proper inbound XDND as a Wayland drag (needs a synthetic grab serial)
 - `INCR` for large pastes
 
-## Backend / packaging
-
-### Defaults tuned for many small outputs
-
-- Avoid relying on the backend pre-map size (1024×768) once the compositor
-  always commits a real mode before map. A 1×1 or first preferred size is
-  enough as a placeholder.
-- Optional: skip the backend's own `WM_NORMAL_HINTS` when the compositor is
-  about to set them, or document that the compositor owns hints.
-
 ## Explicitly out of scope (for now)
 
 - Layer-shell (not meaningful without a real desktop surface)

@@ -21,8 +21,8 @@ is tracked in [TODO.md](TODO.md) — read that before starting larger changes.
 default; `-Duse_system_wlroots=true` is an explicit escape hatch only.
 Important local changes:
 
-- `WM_NORMAL_HINTS` / `WM_SIZE_HINTS` atoms and size-only hints at create
-- Create window at (0,0) with no position flags (host WM places)
+- Create window at (0,0) with a **1×1 placeholder** mode; backend does **not**
+  set `WM_NORMAL_HINTS` (compositor owns hints via `win_sync_size_hints`)
 - In `output_commit`, apply `MODE` **before** `MapWindow` so MapRequest sees
   the real client size (needed for mouse/center placement)
 - Public helpers `wlr_x11_output_get_window()` and

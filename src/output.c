@@ -582,8 +582,8 @@ void create_output_for_window(struct wlx_window *win) {
 
 	/* Size then map in one commit. The X11 backend applies MODE before
 	 * MapWindow so the host WM sees the real client size on MapRequest
-	 * (mouse/center placement). Mapping at the 1024x768 default and
-	 * resizing afterward left the frame where the large window was placed. */
+	 * (mouse/center placement). Mapping at the create-time 1x1 placeholder
+	 * and resizing afterward would leave the frame mis-anchored. */
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	if (want_w > 0 && want_h > 0) {
