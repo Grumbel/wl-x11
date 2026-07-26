@@ -615,6 +615,9 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, 1, 1, 0);
+	/* Match the window visual (ARGB8888 when depth 32). Default XRGB8888
+	 * fails swapchain pick when primary formats only advertise ARGB. */
+	wlr_output_state_set_render_format(&state, x11->x11_format->drm);
 
 	wlr_output_init(wlr_output, &x11->backend, &output_impl, x11->event_loop, &state);
 	wlr_output_state_finish(&state);
@@ -631,12 +634,13 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	snprintf(description, sizeof(description), "X11 output %zu", output_num);
 	wlr_output_set_description(wlr_output, description);
 
-	// The X11 protocol requires us to set a colormap and border pixel if the
-	// depth doesn't match the root window's
-	uint32_t mask = XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK |
-		XCB_CW_COLORMAP | XCB_CW_CURSOR;
+	/* Colormap + border required when depth ≠ root. Background 0 keeps
+	 * unset pixels transparent on ARGB visuals (host compositor blends). */
+	uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL |
+		XCB_CW_EVENT_MASK | XCB_CW_COLORMAP | XCB_CW_CURSOR;
 	uint32_t values[] = {
-		0,
+		0, /* back_pixel: fully transparent on depth 32 */
+		0, /* border_pixel */
 		XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY,
 		x11->colormap,
 		x11->transparent_cursor,

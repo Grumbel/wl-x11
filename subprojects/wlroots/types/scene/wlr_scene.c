@@ -2544,9 +2544,13 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 		}
 	}
 
+	/* Transparent clear when the output buffer has an alpha channel so
+	 * host ARGB windows can composite over the desktop. Opaque black
+	 * otherwise (depth-24 / XRGB backends). */
+	bool has_alpha = !wlr_buffer_is_opaque(buffer);
 	wlr_render_pass_add_rect(render_pass, &(struct wlr_render_rect_options){
 		.box = { .width = buffer->width, .height = buffer->height },
-		.color = { .r = 0, .g = 0, .b = 0, .a = 1 },
+		.color = { .r = 0, .g = 0, .b = 0, .a = has_alpha ? 0.f : 1.f },
 		.clip = &background,
 	});
 	pixman_region32_fini(&background);

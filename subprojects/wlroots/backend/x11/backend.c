@@ -597,9 +597,17 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 		goto error_event;
 	}
 
-	x11->depth = get_depth(x11->screen, 24);
+	/* Prefer 32-bit ARGB so per-pixel alpha is preserved (rootless nested
+	 * windows, CSD shadows, etc.). Fall back to 24-bit XRGB if unavailable.
+	 * Host needs a compositing WM for ARGB to show the desktop through. */
+	x11->depth = get_depth(x11->screen, 32);
 	if (!x11->depth) {
-		wlr_log(WLR_ERROR, "Failed to get 24-bit depth for X11 screen");
+		wlr_log(WLR_INFO, "No 32-bit depth on X11 screen; trying 24-bit "
+			"(no per-pixel alpha)");
+		x11->depth = get_depth(x11->screen, 24);
+	}
+	if (!x11->depth) {
+		wlr_log(WLR_ERROR, "Failed to get 32- or 24-bit depth for X11 screen");
 		goto error_event;
 	}
 
@@ -614,6 +622,9 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 		wlr_log(WLR_ERROR, "Unsupported depth %"PRIu8, x11->depth->depth);
 		goto error_event;
 	}
+	wlr_log(WLR_INFO, "X11 backend visual depth %"PRIu8" (%s)",
+		x11->depth->depth,
+		x11->depth->depth == 32 ? "ARGB8888" : "XRGB8888");
 
 	x11->colormap = xcb_generate_id(x11->xcb);
 	xcb_create_colormap(x11->xcb, XCB_COLORMAP_ALLOC_NONE, x11->colormap,
@@ -647,6 +658,11 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 			wlr_drm_format_set_add(&x11->primary_dri3_formats,
 				dri3_format->format, dri3_format->modifiers[i]);
 		}
+	} else if (x11->have_dri3) {
+		/* DRI3 did not advertise our window format; still allow it with
+		 * the implicit modifier so swapchain pick can succeed. */
+		wlr_drm_format_set_add(&x11->primary_dri3_formats,
+			x11->x11_format->drm, DRM_FORMAT_MOD_INVALID);
 	}
 
 	const struct wlr_drm_format *shm_format =
@@ -654,6 +670,9 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 	if (x11->have_shm && shm_format != NULL) {
 		wlr_drm_format_set_add(&x11->primary_shm_formats,
 			shm_format->format, DRM_FORMAT_MOD_INVALID);
+	} else if (x11->have_shm) {
+		wlr_drm_format_set_add(&x11->primary_shm_formats,
+			x11->x11_format->drm, DRM_FORMAT_MOD_INVALID);
 	}
 
 #if HAVE_XCB_ERRORS
