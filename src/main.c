@@ -532,11 +532,21 @@ static bool query_root_pointer_position(struct wc_server *s, int16_t *x, int16_t
 
 #define WC_DRAG_THROTTLE_MS 16
 
+/* Window we actually xcb_configure during interactive move/resize.
+ * Must be the real client window (content_xwin), not the WM frame:
+ * ICCCM requires clients to configure their own window; the WM then
+ * moves/resizes the frame. Configuring the frame is undefined and
+ * breaks on many WMs. Falls back to xwin when content is unknown. */
+static xcb_window_t configure_target_window(struct wc_window *win) {
+	return ewmh_target_window(win);
+}
+
 static void begin_interactive_move(struct wc_window *win) {
 	struct wc_server *server = win->server;
+	xcb_window_t target = configure_target_window(win);
 	int16_t wx, wy, px, py;
-	if (win->xwin == XCB_WINDOW_NONE ||
-			!query_window_root_position(server, win->xwin, &wx, &wy) ||
+	if (target == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, target, &wx, &wy) ||
 			!query_root_pointer_position(server, &px, &py)) {
 		return;
 	}
@@ -545,25 +555,38 @@ static void begin_interactive_move(struct wc_window *win) {
 	server->move_offset_y = wy - py;
 	server->drag_last_send_at = (struct timespec){0};
 
-	int16_t inset_x = 0, inset_y = 0;
-	query_window_relative_offset(server, win->content_xwin, &inset_x, &inset_y);
-	server->drag_correction_x = inset_x;
-	server->drag_correction_y = inset_y;
+	/* When target is the content window parented under a frame, root
+	 * position already reflects the final on-screen origin of the
+	 * client area; no extra inset correction is needed. Only apply
+	 * relative-offset correction when we are still configuring the
+	 * frame itself (content unknown). */
+	server->drag_correction_x = 0;
+	server->drag_correction_y = 0;
+	if (target == win->xwin && win->content_xwin != XCB_WINDOW_NONE &&
+			win->content_xwin != win->xwin) {
+		int16_t inset_x = 0, inset_y = 0;
+		if (query_window_relative_offset(server, win->content_xwin,
+				&inset_x, &inset_y)) {
+			server->drag_correction_x = inset_x;
+			server->drag_correction_y = inset_y;
+		}
+	}
 
 	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
-		"0x%x at (%d,%d), pointer at (%d,%d), offset (%d,%d), "
-		"correction (%d,%d)", win->xwin, wx, wy, px, py,
-		server->move_offset_x, server->move_offset_y,
+		"0x%x (configure target 0x%x) at (%d,%d), pointer at (%d,%d), "
+		"offset (%d,%d), correction (%d,%d)", win->xwin, target, wx, wy,
+		px, py, server->move_offset_x, server->move_offset_y,
 		server->drag_correction_x, server->drag_correction_y);
 }
 
 static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	struct wc_server *server = win->server;
+	xcb_window_t target = configure_target_window(win);
 	int16_t wx, wy, px, py;
 	int w, h;
-	if (win->xwin == XCB_WINDOW_NONE ||
-			!query_window_root_position(server, win->xwin, &wx, &wy) ||
-			!query_window_geometry(server, win->xwin, &w, &h) ||
+	if (target == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, target, &wx, &wy) ||
+			!query_window_geometry(server, target, &w, &h) ||
 			!query_root_pointer_position(server, &px, &py)) {
 		return;
 	}
@@ -577,14 +600,22 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	server->resize_start_pointer_y = py;
 	server->drag_last_send_at = (struct timespec){0};
 
-	int16_t inset_x = 0, inset_y = 0;
-	query_window_relative_offset(server, win->content_xwin, &inset_x, &inset_y);
-	server->drag_correction_x = inset_x;
-	server->drag_correction_y = inset_y;
+	server->drag_correction_x = 0;
+	server->drag_correction_y = 0;
+	if (target == win->xwin && win->content_xwin != XCB_WINDOW_NONE &&
+			win->content_xwin != win->xwin) {
+		int16_t inset_x = 0, inset_y = 0;
+		if (query_window_relative_offset(server, win->content_xwin,
+				&inset_x, &inset_y)) {
+			server->drag_correction_x = inset_x;
+			server->drag_correction_y = inset_y;
+		}
+	}
 
 	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
-		"0x%x (edges 0x%x) at (%d,%d) %dx%d, pointer at (%d,%d), "
-		"correction (%d,%d)", win->xwin, edges, wx, wy, w, h, px, py,
+		"0x%x (configure target 0x%x, edges 0x%x) at (%d,%d) %dx%d, "
+		"pointer at (%d,%d), correction (%d,%d)", win->xwin, target,
+		edges, wx, wy, w, h, px, py,
 		server->drag_correction_x, server->drag_correction_y);
 }
 
@@ -897,33 +928,87 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			}
 		} else if (type == XCB_FOCUS_OUT) {
 			xcb_focus_out_event_t *fo = (xcb_focus_out_event_t *)event;
-			if (server->focused_window && server->focused_window->xwin == fo->event) {
-				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x", fo->event);
+			/* Match the same way as FocusIn: focus may land on the
+			 * content window or a decoration child, not only the frame.
+			 * detail == Inferior means focus moved to a child of this
+			 * window (still inside our toplevel subtree) — do not clear. */
+			struct wc_window *win = window_from_xwin(server, fo->event);
+			if (win && server->focused_window == win &&
+					fo->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
+				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x (detail %u)",
+					fo->event, fo->detail);
 				set_active_window(server, NULL);
 			}
+		} else if (type == XCB_REPARENT_NOTIFY) {
+			/* WM reparented our window into a decoration frame (or the
+			 * reverse). Update frame vs. content identity and re-walk the
+			 * subtree so related[] tracks decoration widgets too. */
+			xcb_reparent_notify_event_t *rn =
+				(xcb_reparent_notify_event_t *)event;
+			struct wc_window *win = window_from_xwin(server, rn->window);
+			if (win && win->xwin != XCB_WINDOW_NONE) {
+				wlr_log(WLR_INFO, "X11 ReparentNotify for 0x%x (parent 0x%x) "
+					"on toplevel \"%s\" — refreshing window subtree",
+					rn->window, rn->parent,
+					win->toplevel && win->toplevel->title ?
+						win->toplevel->title : "?");
+				/* Client was reparented under a new frame: the event
+				 * window is the client, parent is the WM frame. */
+				if (rn->parent != XCB_WINDOW_NONE &&
+						rn->parent != server->xcb_root &&
+						(rn->window == win->xwin ||
+						 rn->window == win->content_xwin)) {
+					win->content_xwin = rn->window;
+					win->xwin = rn->parent;
+				}
+				win->related_count = 0;
+				memset(win->related, 0, sizeof(win->related));
+				register_x11_window_subtree(win, win->xwin);
+				xcb_window_t found = find_content_window(server, win);
+				if (found != XCB_WINDOW_NONE) {
+					win->content_xwin = found;
+				} else if (win->content_xwin == XCB_WINDOW_NONE) {
+					win->content_xwin = win->xwin;
+				}
+				xwin_set_default_cursor(server, win->content_xwin);
+			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
-			/* Learn xfwm4's systematic position discrepancy from real
+			/* Learn the WM's systematic position discrepancy from real
 			 * feedback (see the comment on struct wc_server's
 			 * drag_correction_x field) rather than assuming a fixed
-			 * value, since it's WM-theme-specific. Only for the actual
-			 * top-level window (not the decoration subtree). */
+			 * value, since it's WM-theme-specific. Match against the
+			 * same window we actually configure (content when known). */
 			if (server->move_win || server->resize_win) {
 				xcb_configure_notify_event_t *cn =
 					(xcb_configure_notify_event_t *)event;
 				struct wc_window *active =
 					server->move_win ? server->move_win : server->resize_win;
-				if (cn->window == active->xwin) {
-					int new_correction_x = cn->x - server->drag_last_requested_x;
-					int new_correction_y = cn->y - server->drag_last_requested_y;
-					wlr_log(WLR_INFO, "[DIAG] real ConfigureNotify for "
-						"dragged window 0x%x: pos=(%d,%d) size=%dx%d "
-						"border=%d (learned correction now (%d,%d), "
-						"was (%d,%d))", cn->window, cn->x, cn->y,
-						cn->width, cn->height, cn->border_width,
-						new_correction_x, new_correction_y,
-						server->drag_correction_x, server->drag_correction_y);
-					server->drag_correction_x = new_correction_x;
-					server->drag_correction_y = new_correction_y;
+				xcb_window_t target = ewmh_target_window(active);
+				if (cn->window == target || cn->window == active->xwin) {
+					/* ConfigureNotify x/y are parent-relative. For the
+					 * client window parented under a frame this is the
+					 * border inset, not a root-relative error — only
+					 * learn correction when the event is on the frame
+					 * (parent is root) or when we have no separate
+					 * content window. */
+					if (cn->window == active->xwin ||
+							active->content_xwin == XCB_WINDOW_NONE ||
+							active->content_xwin == active->xwin) {
+						int new_correction_x =
+							cn->x - server->drag_last_requested_x;
+						int new_correction_y =
+							cn->y - server->drag_last_requested_y;
+						wlr_log(WLR_INFO, "[DIAG] real ConfigureNotify for "
+							"dragged window 0x%x: pos=(%d,%d) size=%dx%d "
+							"border=%d (learned correction now (%d,%d), "
+							"was (%d,%d))", cn->window, cn->x, cn->y,
+							cn->width, cn->height, cn->border_width,
+							new_correction_x, new_correction_y,
+							server->drag_correction_x,
+							server->drag_correction_y);
+						server->drag_correction_x = new_correction_x;
+						server->drag_correction_y = new_correction_y;
+					}
 				}
 			}
 		}
@@ -998,6 +1083,24 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	win->scene_output = NULL;
 	win->l_output = NULL;
 	win->xwin = XCB_WINDOW_NONE;
+	/* Drop all cached X11 identities so a later remap cannot match stale
+	 * Xids (focus, EWMH targets, move/resize) or overflow related[]. */
+	win->content_xwin = XCB_WINDOW_NONE;
+	win->related_count = 0;
+	memset(win->related, 0, sizeof(win->related));
+
+	if (win->server->move_win == win) {
+		win->server->move_win = NULL;
+	}
+	if (win->server->resize_win == win) {
+		win->server->resize_win = NULL;
+	}
+	if (win->server->focused_window == win) {
+		/* X11 window is gone; drop activated/keyboard focus. Avoid
+		 * calling set_active_window here (it would touch toplevel state
+		 * while the surface may already be tearing down). */
+		win->server->focused_window = NULL;
+	}
 }
 
 #define WC_DEFAULT_WIDTH 1024
@@ -1009,6 +1112,13 @@ static void create_output_for_window(struct wc_window *win) {
 	wlr_log(WLR_INFO, "mapping toplevel \"%s\" (app_id \"%s\") to a new X11 window",
 		win->toplevel->title ? win->toplevel->title : "(no title)",
 		win->toplevel->app_id ? win->toplevel->app_id : "(no app_id)");
+
+	/* Fresh X11 identity state (also cleared in output_destroy; reset
+	 * here so a remap never carries stale related[] entries). */
+	win->xwin = XCB_WINDOW_NONE;
+	win->content_xwin = XCB_WINDOW_NONE;
+	win->related_count = 0;
+	memset(win->related, 0, sizeof(win->related));
 
 	xcb_window_t *before = NULL;
 	int before_n = 0;
@@ -1087,13 +1197,18 @@ static void create_output_for_window(struct wc_window *win) {
 	wlr_xdg_toplevel_set_size(win->toplevel, w, h);
 
 	/* Best-effort: find the xcb_window_t the backend just created so we
-	 * can set WM_NAME / WM_CLASS on it. */
+	 * can set WM_NAME / WM_CLASS on it. Prefer a newly appeared root
+	 * child whose size matches the output we just committed — reduces
+	 * mis-attribution when several toplevels map concurrently. */
 	xcb_roundtrip(server->xcb);
 	xcb_window_t *after = NULL;
 	int after_n = 0;
 	query_root_children(server->xcb, server->xcb_root, &after, &after_n);
 
 	win->xwin = XCB_WINDOW_NONE;
+	xcb_window_t fallback = XCB_WINDOW_NONE;
+	int want_w = output->width > 0 ? output->width : WC_DEFAULT_WIDTH;
+	int want_h = output->height > 0 ? output->height : WC_DEFAULT_HEIGHT;
 	for (int i = 0; i < after_n; i++) {
 		bool seen = false;
 		for (int j = 0; j < before_n; j++) {
@@ -1102,10 +1217,21 @@ static void create_output_for_window(struct wc_window *win) {
 				break;
 			}
 		}
-		if (!seen) {
+		if (seen) {
+			continue;
+		}
+		if (fallback == XCB_WINDOW_NONE) {
+			fallback = after[i];
+		}
+		int gw = 0, gh = 0;
+		if (query_window_geometry(server, after[i], &gw, &gh) &&
+				gw == want_w && gh == want_h) {
 			win->xwin = after[i];
 			break;
 		}
+	}
+	if (win->xwin == XCB_WINDOW_NONE) {
+		win->xwin = fallback;
 	}
 	free(before);
 	free(after);
@@ -1115,6 +1241,12 @@ static void create_output_for_window(struct wc_window *win) {
 			win->xwin);
 		register_x11_window_subtree(win, win->xwin);
 		win->content_xwin = find_content_window(server, win);
+		/* Before the WM reparents, the root child *is* the client
+		 * window — treat it as content so EWMH/configure have a valid
+		 * target. ReparentNotify will refresh this later. */
+		if (win->content_xwin == XCB_WINDOW_NONE) {
+			win->content_xwin = win->xwin;
+		}
 		xwin_set_default_cursor(server, win->content_xwin);
 		/* Set on both: the frame (win->xwin), since that's what xfwm4
 		 * appears to actually display, and the content window (the
@@ -1282,6 +1414,10 @@ static void server_new_toplevel_decoration(struct wl_listener *listener, void *d
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
 
 	struct wc_decoration *deco = calloc(1, sizeof(*deco));
+	if (!deco) {
+		wlr_log(WLR_ERROR, "out of memory allocating decoration tracker");
+		return;
+	}
 	deco->request_mode.notify = decoration_request_mode;
 	wl_signal_add(&decoration->events.request_mode, &deco->request_mode);
 	deco->destroy.notify = decoration_destroy;
@@ -1305,6 +1441,10 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wlr_log(WLR_INFO, "new xdg_toplevel created (not yet mapped)");
 
 	struct wc_window *win = calloc(1, sizeof(*win));
+	if (!win) {
+		wlr_log(WLR_ERROR, "out of memory allocating wc_window");
+		return;
+	}
 	win->server = server;
 	win->toplevel = toplevel;
 	win->xwin = XCB_WINDOW_NONE;
@@ -1393,22 +1533,30 @@ static void update_interactive_drag(struct wc_server *server) {
 	}
 
 	if (server->move_win) {
+		xcb_window_t target = configure_target_window(server->move_win);
+		if (target == XCB_WINDOW_NONE) {
+			return;
+		}
 		int x = px + server->move_offset_x - server->drag_correction_x;
 		int y = py + server->move_offset_y - server->drag_correction_y;
 		server->drag_last_requested_x = x;
 		server->drag_last_requested_y = y;
 		wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window "
 			"0x%x at (%d,%d) (correction (%d,%d))", px, py,
-			server->move_win->xwin, x, y, server->drag_correction_x,
+			target, x, y, server->drag_correction_x,
 			server->drag_correction_y);
 		uint32_t values[2] = { (uint32_t)x, (uint32_t)y };
-		xcb_configure_window(server->xcb, server->move_win->xwin,
+		xcb_configure_window(server->xcb, target,
 			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
 		xcb_flush(server->xcb);
 		return;
 	}
 
 	/* resize */
+	xcb_window_t target = configure_target_window(server->resize_win);
+	if (target == XCB_WINDOW_NONE) {
+		return;
+	}
 	int dx = px - server->resize_start_pointer_x;
 	int dy = py - server->resize_start_pointer_y;
 	int x = server->resize_start_x;
@@ -1441,12 +1589,12 @@ static void update_interactive_drag(struct wc_server *server) {
 
 	wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window 0x%x "
 		"at (%d,%d) %dx%d (correction (%d,%d))", px, py,
-		server->resize_win->xwin, x, y, w, h, server->drag_correction_x,
+		target, x, y, w, h, server->drag_correction_x,
 		server->drag_correction_y);
 	uint32_t values[4] = {
 		(uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h,
 	};
-	xcb_configure_window(server->xcb, server->resize_win->xwin,
+	xcb_configure_window(server->xcb, target,
 		XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
 		XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
 	xcb_flush(server->xcb);
@@ -1581,6 +1729,10 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		wlr_keyboard_set_repeat_info(wlr_kb, 25, 600);
 
 		struct wc_keyboard *kb = calloc(1, sizeof(*kb));
+		if (!kb) {
+			wlr_log(WLR_ERROR, "out of memory allocating keyboard tracker");
+			break;
+		}
 		kb->server = server;
 		kb->wlr_keyboard = wlr_kb;
 		kb->modifiers.notify = keyboard_modifiers;
@@ -1683,6 +1835,10 @@ static void client_created_notify(struct wl_listener *listener, void *data) {
 		server->active_clients);
 
 	struct wc_client_track *track = calloc(1, sizeof(*track));
+	if (!track) {
+		wlr_log(WLR_ERROR, "out of memory allocating client tracker");
+		return;
+	}
 	track->server = server;
 	track->destroy.notify = client_destroy_notify;
 	wl_client_add_destroy_listener(client, &track->destroy);
