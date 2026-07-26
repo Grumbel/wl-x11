@@ -1,4 +1,7 @@
 /*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Ingo Ruhnke <grumbel@gmail.com>
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
  * wl-x11 - a minimal wlroots Wayland compositor that runs nested inside an
  * X11 session.
  *

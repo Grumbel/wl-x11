@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 Ingo Ruhnke <grumbel@gmail.com>
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
+
 # wl-x11
 
 A minimal [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)-based
@@ -119,4 +124,13 @@ adjust `src/main.c` accordingly; the overall architecture does not change.
 
 ## License
 
-MIT.
+[GPL-3.0-or-later](https://spdx.org/licenses/GPL-3.0-or-later.html).
+See [`LICENSES/GPL-3.0-or-later.txt`](LICENSES/GPL-3.0-or-later.txt) and
+SPDX headers in each file. Compliance can be checked with
+[REUSE](https://reuse.software/):
+
+```sh
+nix flake check        # runs `reuse lint` via checks.reuse
+# or, in the dev shell:
+reuse lint
+```
