@@ -476,9 +476,13 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	win->size_from_wm = true;
 	/* output_commit() fires synchronously as part of this call and
 	 * handles diffing the new size against what we last told the
-	 * toplevel and forwarding it if different -- nothing further needed
-	 * here. */
+	 * toplevel and forwarding it if different. Schedule a frame so the
+	 * next painted buffer lands ASAP (reduces empty-window flash after
+	 * the swapchain is recreated at the new size). */
 	wlr_output_commit_state(win->output, event->state);
+	if (win->output) {
+		wlr_output_schedule_frame(win->output);
+	}
 }
 
 /* Drive both the xdg_toplevel ACTIVATED state (which is what clients like

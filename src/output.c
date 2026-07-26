@@ -91,12 +91,56 @@ void wlx_apply_content_scale(struct wlx_window *win) {
 	scene_node_apply_scale(&win->scene_tree->node, scale);
 }
 
-void output_frame(struct wl_listener *listener, void *data) {
-	struct wlx_window *win = wl_container_of(listener, win, output_frame);
-	if (!win->scene_output) {
+/* Stretch every surface buffer under node to fill the output so a resize
+ * still shows the last client content instead of a transparent hole. */
+static void scene_node_stretch_to(struct wlr_scene_node *node,
+		int out_w, int out_h) {
+	if (!node || !node->enabled) {
 		return;
 	}
+	if (node->type == WLR_SCENE_NODE_BUFFER) {
+		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
+		struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(sb);
+		if (ss && ss->surface &&
+				ss->surface->current.width > 0 &&
+				ss->surface->current.height > 0) {
+			wlr_scene_buffer_set_dest_size(sb, out_w, out_h);
+			wlr_scene_node_set_position(node, 0, 0);
+		}
+		return;
+	}
+	if (node->type == WLR_SCENE_NODE_TREE) {
+		struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &tree->children, link) {
+			scene_node_stretch_to(child, out_w, out_h);
+		}
+	}
+}
+
+static void paint_hold_frame(struct wlx_window *win) {
+	if (!win || !win->scene_output || !win->output || !win->scene_tree) {
+		return;
+	}
+	scene_node_stretch_to(&win->scene_tree->node,
+		win->output->width, win->output->height);
 	wlr_scene_output_commit(win->scene_output, NULL);
+}
+
+void output_frame(struct wl_listener *listener, void *data) {
+	struct wlx_window *win = wl_container_of(listener, win, output_frame);
+	if (!win->scene_output || !win->output) {
+		return;
+	}
+
+	/* After a host resize the X window is already the new size and often
+	 * cleared. Stretch the last client buffer to fill until the client
+	 * commits a matching frame. */
+	if (win->hold_present) {
+		paint_hold_frame(win);
+	} else {
+		wlr_scene_output_commit(win->scene_output, NULL);
+	}
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -119,8 +163,19 @@ void output_commit(struct wl_listener *listener, void *data) {
 	if (w == win->last_output_width && h == win->last_output_height) {
 		return;
 	}
+	/* Only hold the previous frame if we already had a painted size.
+	 * Avoid blocking the first map frame. */
+	bool had_frame = win->last_output_width > WLX_MIN_OUTPUT_SIZE &&
+		win->last_output_height > WLX_MIN_OUTPUT_SIZE;
 	win->last_output_width = w;
 	win->last_output_height = h;
+	if (had_frame) {
+		/* Paint a stretched copy of the last client buffer *now*, in the
+		 * same handler as the size change. Waiting for the next frame
+		 * event leaves a blank gap after the host clears the ARGB window. */
+		win->hold_present = true;
+		paint_hold_frame(win);
+	}
 
 	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
@@ -513,6 +568,7 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 	win->last_output_width = win->output->width;
 	win->last_output_height = win->output->height;
 	win_sync_size_hints(win);
+	wlr_output_schedule_frame(win->output);
 }
 
 void create_output_for_window(struct wlx_window *win) {

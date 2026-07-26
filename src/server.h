@@ -279,6 +279,9 @@ struct wlx_window {
 	 * size we stop auto-fitting the output to the client's geometry, so
 	 * a user-enlarged window is not yanked back down on the next commit. */
 	bool size_from_wm;
+	/* Skip scene Present after an output size change until the client
+	 * commits a new buffer, so the previous frame stays on screen. */
+	bool hold_present;
 
 	xcb_window_t xwin;
 #define WLX_MAX_RELATED_WINDOWS 32

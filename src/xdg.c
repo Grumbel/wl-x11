@@ -43,6 +43,30 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		win->output != NULL,
 		win->toplevel->base->surface->buffer != NULL);
 
+	/* Drop stretch-hold once the client buffer roughly matches the host
+	 * size (intermediate commits would otherwise stop the hold early). */
+	if (win->hold_present && win->output && win->toplevel &&
+			win->toplevel->base->surface) {
+		struct wlr_surface *surf = win->toplevel->base->surface;
+		int ow = wlx_unscale_size(win->server, win->output->width);
+		int oh = wlx_unscale_size(win->server, win->output->height);
+		int sw = surf->current.width;
+		int sh = surf->current.height;
+		if (!win->server->prefer_csd) {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			if (geo.width > 0 && geo.height > 0) {
+				sw = geo.width;
+				sh = geo.height;
+			}
+		}
+		int dw = sw > ow ? sw - ow : ow - sw;
+		int dh = sh > oh ? sh - oh : oh - sh;
+		if (dw <= 2 && dh <= 2) {
+			win->hold_present = false;
+			wlr_output_schedule_frame(win->output);
+		}
+	}
+
 	/* The client cannot attach a buffer (and therefore cannot map) until
 	 * it has received and ack'd at least one xdg_surface.configure. By
 	 * the time this commit listener runs, wlroots' own xdg_surface

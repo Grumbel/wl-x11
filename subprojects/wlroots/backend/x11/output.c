@@ -635,12 +635,19 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	wlr_output_set_description(wlr_output, description);
 
 	/* Colormap + border required when depth ≠ root. Background 0 keeps
-	 * unset pixels transparent on ARGB visuals (host compositor blends). */
+	 * unset pixels transparent on ARGB visuals (host compositor blends).
+	 * NorthWest bit gravity keeps old pixels on resize so the window does
+	 * not flash empty between Configure and the next Present of a
+	 * matching-size buffer. Backing store helps when the X server supports it. */
 	uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL |
+		XCB_CW_BIT_GRAVITY | XCB_CW_WIN_GRAVITY | XCB_CW_BACKING_STORE |
 		XCB_CW_EVENT_MASK | XCB_CW_COLORMAP | XCB_CW_CURSOR;
 	uint32_t values[] = {
 		0, /* back_pixel: fully transparent on depth 32 */
 		0, /* border_pixel */
+		XCB_GRAVITY_NORTH_WEST,
+		XCB_GRAVITY_NORTH_WEST,
+		XCB_BACKING_STORE_WHEN_MAPPED,
 		XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY,
 		x11->colormap,
 		x11->transparent_cursor,
