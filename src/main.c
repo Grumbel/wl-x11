@@ -207,7 +207,8 @@ int main(int argc, char **argv) {
 
 	wl_list_init(&server.windows);
 
-	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 3);
+	/* Version ≥ 5 for xdg_toplevel.wm_capabilities (GTK/libadwaita CSD). */
+	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 5);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 

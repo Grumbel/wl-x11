@@ -124,9 +124,19 @@ void output_commit(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
-		/* Client sees logical size; host window is scaled pixels. */
+		/* Client sees logical window geometry; host may be larger by CSD margin. */
 		int lw = wlx_unscale_size(win->server, w);
 		int lh = wlx_unscale_size(win->server, h);
+		if (win->server->prefer_csd) {
+			lw -= win->csd_margin_w;
+			lh -= win->csd_margin_h;
+			if (lw < 1) {
+				lw = 1;
+			}
+			if (lh < 1) {
+				lh = 1;
+			}
+		}
 		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
 	}
 	/* Keep host WM constraints aligned with the new size / xdg min-max. */
@@ -183,18 +193,24 @@ void output_destroy(struct wl_listener *listener, void *data) {
 
 }
 
-/* Preferred size: xdg window geometry first (excludes client-side shadow /
- * transparent padding that would otherwise show as black without RGBA
- * compositing), then surface buffer size, then the compositor default. */
+/* Preferred host window size (logical pixels before content_scale).
+ * SSD (default): xdg window geometry — excludes CSD shadow so we don't
+ * show black padding without alpha.
+ * CSD (--csd): full surface buffer size so GTK/Qt resize edges and
+ * shadows in the margin outside geometry are not clipped. */
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	int w = 0, h = 0;
 	if (win->toplevel && win->toplevel->base) {
-		struct wlr_box geo = win->toplevel->base->current.geometry;
-		w = geo.width;
-		h = geo.height;
-		if (w <= 0 || h <= 0) {
-			struct wlr_surface *surf = win->toplevel->base->surface;
-			if (surf) {
+		struct wlr_surface *surf = win->toplevel->base->surface;
+		bool csd = win->server && win->server->prefer_csd;
+		if (csd && surf && surf->current.width > 0 && surf->current.height > 0) {
+			w = surf->current.width;
+			h = surf->current.height;
+		} else {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			w = geo.width;
+			h = geo.height;
+			if ((w <= 0 || h <= 0) && surf) {
 				w = surf->current.width;
 				h = surf->current.height;
 			}
@@ -630,9 +646,27 @@ void create_output_for_window(struct wlx_window *win) {
 	win->output_request_state.notify = output_request_state;
 	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
-	wlr_xdg_toplevel_set_size(win->toplevel,
-		wlx_unscale_size(server, output->width),
-		wlx_unscale_size(server, output->height));
+	{
+		int conf_w = wlx_unscale_size(server, output->width);
+		int conf_h = wlx_unscale_size(server, output->height);
+		if (server->prefer_csd && win->toplevel) {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			if (geo.width > 0 && geo.height > 0) {
+				conf_w = geo.width;
+				conf_h = geo.height;
+			} else {
+				conf_w -= win->csd_margin_w;
+				conf_h -= win->csd_margin_h;
+				if (conf_w < 1) {
+					conf_w = 1;
+				}
+				if (conf_h < 1) {
+					conf_h = 1;
+				}
+			}
+		}
+		wlr_xdg_toplevel_set_size(win->toplevel, conf_w, conf_h);
+	}
 	wlx_apply_content_scale(win);
 
 	/* First frame only after position/hints are applied. */

@@ -271,6 +271,10 @@ struct wlx_window {
 	struct wlr_scene_output *scene_output;
 	int last_output_width;
 	int last_output_height;
+	/* CSD margin (buffer − window geometry) in logical px. Host window
+	 * includes the margin; xdg configure size does not. */
+	int csd_margin_w;
+	int csd_margin_h;
 	/* Once the host WM (or interactive resize) changes the X11 window
 	 * size we stop auto-fitting the output to the client's geometry, so
 	 * a user-enlarged window is not yanked back down on the next commit. */

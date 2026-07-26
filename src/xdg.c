@@ -55,6 +55,13 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	 * window right after it maps. */
 	if (!win->initial_configure_sent) {
 		win->initial_configure_sent = true;
+		/* Must run after the surface is initialized (this commit path).
+		 * set_wm_capabilities schedules a configure itself. */
+		wlr_xdg_toplevel_set_wm_capabilities(win->toplevel,
+			WLR_XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU |
+			WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE |
+			WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN |
+			WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE);
 		wlr_xdg_surface_schedule_configure(win->toplevel->base);
 	}
 
@@ -67,24 +74,45 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		wlr_xdg_toplevel_decoration_v1_set_mode(decoration, mode);
 	}
 
-	/* Fit the X11 window to the client's geometry until the WM/user
-	 * resizes it. Fixes transient dialogs that first mapped with a
-	 * default size and only later committed their real size. */
-	if (win->output && !win->size_from_wm && win->toplevel) {
+	/* Track CSD margin (buffer − geometry) so host resizes configure the
+	 * client with geometry size while the X11 window stays buffer-sized. */
+	if (win->toplevel && win->toplevel->base->surface) {
 		struct wlr_box geo = win->toplevel->base->current.geometry;
-		/* Prefer xdg geometry (opaque window area). Buffer size can include
-		 * transparent CSD shadow drawn as black without host alpha. */
-		int cw = geo.width;
-		int ch = geo.height;
+		struct wlr_surface *surf = win->toplevel->base->surface;
+		if (geo.width > 0 && geo.height > 0 &&
+				surf->current.width > 0 && surf->current.height > 0) {
+			int mw = surf->current.width - geo.width;
+			int mh = surf->current.height - geo.height;
+			if (mw < 0) {
+				mw = 0;
+			}
+			if (mh < 0) {
+				mh = 0;
+			}
+			win->csd_margin_w = mw;
+			win->csd_margin_h = mh;
+		}
+	}
+
+	/* Fit the X11 window to the client until the WM/user resizes it.
+	 * SSD: xdg geometry. CSD: full buffer (shadow/resize margins). */
+	if (win->output && !win->size_from_wm && win->toplevel) {
+		int cw = 0, ch = 0;
+		toplevel_preferred_size(win, &cw, &ch);
+		struct wlr_box geo = win->toplevel->base->current.geometry;
+		int conf_w = (geo.width > 0) ? geo.width : cw;
+		int conf_h = (geo.height > 0) ? geo.height : ch;
 		int out_w = wlx_scale_size(win->server, cw);
 		int out_h = wlx_scale_size(win->server, ch);
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
 				(out_w != win->output->width || out_h != win->output->height)) {
-			wlr_log(WLR_INFO, "fitting X11 window to client geometry %dx%d "
-				"(output %dx%d at scale %.2f)",
-				cw, ch, out_w, out_h, win->server->content_scale);
+			wlr_log(WLR_INFO, "fitting X11 window to client %dx%d "
+				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
+				cw, ch, conf_w, conf_h,
+				win->csd_margin_w, win->csd_margin_h,
+				win->server->content_scale, win->server->prefer_csd);
 			resize_output_to(win, out_w, out_h);
-			wlr_xdg_toplevel_set_size(win->toplevel, cw, ch);
+			wlr_xdg_toplevel_set_size(win->toplevel, conf_w, conf_h);
 			if (win->l_output) {
 				wlr_scene_node_set_position(&win->scene_tree->node,
 					win->l_output->x, win->l_output->y);
