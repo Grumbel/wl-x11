@@ -1,4 +1,4 @@
-# wc-x11
+# wl-x11
 
 A minimal [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots)-based
 Wayland compositor that runs nested inside an X11 session — but, unlike
@@ -12,7 +12,7 @@ them, moves/resizes them, lists them in the taskbar/alt-tab, etc.
 
 wlroots' X11 backend models "windows on the host X server" as
 `wlr_output`s. Normally a compositor creates one such output at startup for
-"the nested desktop". `wc-x11` instead creates a **new output on demand
+"the nested desktop". `wl-x11` instead creates a **new output on demand
 every time a Wayland `xdg_toplevel` surface maps**, sizes that toplevel to
 exactly fill the new output/window, and destroys the output again when the
 toplevel unmaps, is destroyed, or the user closes the X11 window.
@@ -30,7 +30,7 @@ that's entirely up to the host window manager.
 
 ```sh
 nix build .
-./result/bin/wc-x11
+./result/bin/wl-x11
 ```
 
 or, for a dev shell:
@@ -58,7 +58,7 @@ Run it from inside an existing X11 session (a terminal on your desktop is
 fine):
 
 ```sh
-DISPLAY=:0 ./build/wc-x11
+DISPLAY=:0 ./build/wl-x11
 ```
 
 It prints the `WAYLAND_DISPLAY` it created a socket on. Point Wayland
@@ -88,8 +88,11 @@ one-window-per-toplevel model. Notable things it does **not** do:
   clients of this compositor, but is not synced with X11 applications
   running directly on the host. That would require an Xwayland-style
   clipboard proxy.
-- **No compositor-drawn cursor.** Not needed: since every surface lives in
-  a real X11 window, the host X server already renders a pointer over it.
+- **Cursor via the X11 backend output-cursor path.** Client
+  `wl_pointer.set_cursor` surfaces are forwarded with
+  `wlr_cursor_set_surface`; the X11 backend turns them into real X cursors
+  on each output window. Outside client surfaces a theme `left_ptr` is
+  shown. There is no separate compositor-drawn cursor overlay.
 - **Best-effort window title/class syncing.** wlroots doesn't expose the
   raw `xcb_window_t` for backend-created outputs, so `WM_NAME`/`WM_CLASS`
   are set via a small side-channel XCB connection that diffs the root

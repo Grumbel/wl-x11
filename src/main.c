@@ -1,5 +1,5 @@
 /*
- * wc-x11 - a minimal wlroots Wayland compositor that runs nested inside an
+ * wl-x11 - a minimal wlroots Wayland compositor that runs nested inside an
  * X11 session.
  *
  * Unlike Weston's or KWin's X11 backends, which present the whole nested
@@ -70,6 +70,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/util/log.h>
@@ -77,7 +78,6 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <xcb/xcb.h>
-#include <xcb/xcb_cursor.h>
 
 #include <wlr/util/edges.h>
 
@@ -85,14 +85,14 @@
 /* Types                                                                 */
 /* ------------------------------------------------------------------- */
 
-struct wc_server {
+struct wlx_server {
 	struct wl_display *wl_display;
 	struct wl_event_loop *loop;
 	struct wlr_backend *backend;
 	struct wlr_renderer *renderer;
 	struct wlr_allocator *allocator;
 
-	/* For `wc-x11 <command>`: track connected Wayland clients so we can
+	/* For `wl-x11 <command>`: track connected Wayland clients so we can
 	 * shut down once none remain, rather than just watching the spawned
 	 * process (which may fork/re-exec into a different process that
 	 * actually holds the Wayland connection). See client_created_notify()
@@ -115,6 +115,7 @@ struct wc_server {
 
 	struct wlr_seat *seat;
 	struct wlr_cursor *cursor;
+	struct wlr_xcursor_manager *cursor_mgr;
 	bool have_keyboard;
 	bool have_pointer;
 
@@ -124,10 +125,11 @@ struct wc_server {
 	struct wl_listener cursor_button;
 	struct wl_listener cursor_axis;
 	struct wl_listener cursor_frame;
+	struct wl_listener request_set_cursor;
 	struct wl_listener request_set_selection;
 
-	struct wl_list windows; /* wc_window::link */
-	struct wc_window *focused_window;
+	struct wl_list windows; /* wlx_window::link */
+	struct wlx_window *focused_window;
 
 	/* Self-driven interactive move/resize state.
 	 *
@@ -159,16 +161,16 @@ struct wc_server {
 	 * position + offset. There's no running accumulator for noise to
 	 * corrupt -- a single bad sample only affects that one update, not
 	 * everything after it. */
-	struct wc_window *move_win;
+	struct wlx_window *move_win;
 	int move_offset_x, move_offset_y; /* window pos - pointer pos at drag start */
 
-	struct wc_window *resize_win;
+	struct wlx_window *resize_win;
 	uint32_t resize_edges;
 	int resize_start_x, resize_start_y, resize_start_w, resize_start_h;
 	int16_t resize_start_pointer_x, resize_start_pointer_y;
 
 	/* Throttles how often we actually poll+configure -- see
-	 * WC_DRAG_THROTTLE_MS. */
+	 * WLX_DRAG_THROTTLE_MS. */
 	struct timespec drag_last_send_at;
 
 	/* Closed-loop correction: testing showed xfwm4 places the frame at a
@@ -196,14 +198,13 @@ struct wc_server {
 	xcb_atom_t atom_net_wm_state_maximized_horz;
 	xcb_atom_t atom_net_wm_state_fullscreen;
 	xcb_atom_t atom_wm_change_state;
-	xcb_cursor_t default_cursor;
 
 	struct wl_event_source *sigint_source;
 	struct wl_event_source *sigterm_source;
 };
 
-struct wc_window {
-	struct wc_server *server;
+struct wlx_window {
+	struct wlx_server *server;
 	struct wlr_xdg_toplevel *toplevel;
 	struct wlr_scene_tree *scene_tree;
 
@@ -214,8 +215,8 @@ struct wc_window {
 	int last_output_height;
 
 	xcb_window_t xwin;
-#define WC_MAX_RELATED_WINDOWS 32
-	xcb_window_t related[WC_MAX_RELATED_WINDOWS];
+#define WLX_MAX_RELATED_WINDOWS 32
+	xcb_window_t related[WLX_MAX_RELATED_WINDOWS];
 	int related_count;
 	xcb_window_t content_xwin; /* the real wlroots-owned window, distinct
 	                            * from xwin (the WM's decoration frame) */
@@ -242,8 +243,8 @@ struct wc_window {
 	struct wl_list link;
 };
 
-struct wc_keyboard {
-	struct wc_server *server;
+struct wlx_keyboard {
+	struct wlx_server *server;
 	struct wlr_keyboard *wlr_keyboard;
 	struct wl_listener modifiers;
 	struct wl_listener key;
@@ -296,7 +297,7 @@ static void xcb_roundtrip(xcb_connection_t *c) {
 	free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
 }
 
-static void xwin_set_title(struct wc_server *s, xcb_window_t w, const char *title) {
+static void xwin_set_title(struct wlx_server *s, xcb_window_t w, const char *title) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
@@ -310,7 +311,7 @@ static void xwin_set_title(struct wc_server *s, xcb_window_t w, const char *titl
 	xcb_flush(s->xcb);
 }
 
-static void xwin_set_class(struct wc_server *s, xcb_window_t w, const char *app_id) {
+static void xwin_set_class(struct wlx_server *s, xcb_window_t w, const char *app_id) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
@@ -325,61 +326,6 @@ static void xwin_set_class(struct wc_server *s, xcb_window_t w, const char *app_
 	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
 		XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, total, joined);
 	free(joined);
-	xcb_flush(s->xcb);
-}
-
-/* wlroots' X11 backend creates its windows with an invisible cursor by
- * default -- it expects the nested Wayland compositor to render its own
- * pointer image (e.g. from client-provided cursor surfaces). We don't
- * implement that (out of scope for "minimal"), so instead we force a
- * plain, always-visible arrow cursor at the X11 level on every window we
- * create. This means cursor shape doesn't change contextually (no I-beam
- * over text fields, no resize handles, etc.) but the pointer is always
- * visible, which is the important part.
- *
- * We use xcb-cursor (the XCB equivalent of libXcursor) to load a real
- * themed cursor. An earlier version of this used the legacy X core-font
- * glyph cursor mechanism (xcb_open_font(..., "cursor")), which silently
- * does nothing on modern X servers/distros that no longer ship that
- * legacy bitmap font -- the cursor ID it produces doesn't actually exist,
- * so every later attempt to apply it is quietly rejected by the server.
- * xcb-cursor is the mechanism real window managers use and doesn't have
- * that problem. */
-static xcb_cursor_t create_default_cursor(xcb_connection_t *c, xcb_screen_t *screen) {
-	if (!c || xcb_connection_has_error(c) || !screen) {
-		return 0;
-	}
-
-	xcb_cursor_context_t *ctx;
-	if (xcb_cursor_context_new(c, screen, &ctx) < 0) {
-		wlr_log(WLR_ERROR, "xcb_cursor_context_new failed; pointer will stay invisible");
-		return 0;
-	}
-
-	/* Try a couple of common names; themes disagree on which one exists. */
-	xcb_cursor_t cursor = xcb_cursor_load_cursor(ctx, "left_ptr");
-	if (cursor == 0) {
-		cursor = xcb_cursor_load_cursor(ctx, "default");
-	}
-	xcb_cursor_context_free(ctx);
-
-	if (cursor == 0) {
-		wlr_log(WLR_ERROR,
-			"xcb_cursor_load_cursor could not find \"left_ptr\" or \"default\" "
-			"in the current cursor theme; pointer will stay invisible");
-	} else {
-		wlr_log(WLR_INFO, "loaded default X11 cursor (xid 0x%x)", cursor);
-	}
-	return cursor;
-}
-
-static void xwin_set_default_cursor(struct wc_server *s, xcb_window_t w) {
-	if (!s->xcb || xcb_connection_has_error(s->xcb) ||
-			w == XCB_WINDOW_NONE || s->default_cursor == 0) {
-		return;
-	}
-	uint32_t value = s->default_cursor;
-	xcb_change_window_attributes(s->xcb, w, XCB_CW_CURSOR, &value);
 	xcb_flush(s->xcb);
 }
 
@@ -401,7 +347,7 @@ enum {
 	_NET_WM_STATE_ADD = 1,
 };
 
-static void send_root_client_message(struct wc_server *s, xcb_window_t window,
+static void send_root_client_message(struct wlx_server *s, xcb_window_t window,
 		xcb_atom_t type, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3,
 		uint32_t d4) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || window == XCB_WINDOW_NONE) {
@@ -438,7 +384,7 @@ static void send_root_client_message(struct wc_server *s, xcb_window_t window,
 	}
 }
 
-static void send_net_wm_state(struct wc_server *s, xcb_window_t w,
+static void send_net_wm_state(struct wlx_server *s, xcb_window_t w,
 		uint32_t action, xcb_atom_t prop1, xcb_atom_t prop2) {
 	send_root_client_message(s, w, s->atom_net_wm_state, action, prop1, prop2,
 		1 /* source indication: normal application */, 0);
@@ -449,13 +395,13 @@ static void send_net_wm_state(struct wc_server *s, xcb_window_t w,
  * find_content_window() for why. Falls back to xwin if we failed to
  * identify it, which will likely just be ignored by the WM but is
  * better than sending nowhere. */
-static xcb_window_t ewmh_target_window(struct wc_window *win) {
+static xcb_window_t ewmh_target_window(struct wlx_window *win) {
 	return win->content_xwin != XCB_WINDOW_NONE ? win->content_xwin : win->xwin;
 }
 
 /* Real root-relative position of a window's origin, robust regardless of
  * how deep it's nested (handles the WM's reparenting for us). */
-static bool query_window_root_position(struct wc_server *s, xcb_window_t w,
+static bool query_window_root_position(struct wlx_server *s, xcb_window_t w,
 		int16_t *x, int16_t *y) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return false;
@@ -473,7 +419,7 @@ static bool query_window_root_position(struct wc_server *s, xcb_window_t w,
 	return true;
 }
 
-static bool query_window_geometry(struct wc_server *s, xcb_window_t w,
+static bool query_window_geometry(struct wlx_server *s, xcb_window_t w,
 		int *width, int *height) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return false;
@@ -494,7 +440,7 @@ static bool query_window_geometry(struct wc_server *s, xcb_window_t w,
  * upper-left X/Y". For win->content_xwin, whose parent is win->xwin (the
  * WM's decoration frame), this directly gives the border+titlebar inset:
  * no need to infer it by learning from ConfigureNotify feedback. */
-static bool query_window_relative_offset(struct wc_server *s, xcb_window_t w,
+static bool query_window_relative_offset(struct wlx_server *s, xcb_window_t w,
 		int16_t *x, int16_t *y) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
 		return false;
@@ -514,8 +460,8 @@ static bool query_window_relative_offset(struct wc_server *s, xcb_window_t w,
  * from the X server -- bypasses wlroots' own cursor tracking entirely
  * (no output-layout clamping, no per-device normalization, no risk of
  * mixing data from multiple input devices). See the comment on struct
- * wc_server's move_win field for why this matters. */
-static bool query_root_pointer_position(struct wc_server *s, int16_t *x, int16_t *y) {
+ * wlx_server's move_win field for why this matters. */
+static bool query_root_pointer_position(struct wlx_server *s, int16_t *x, int16_t *y) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb)) {
 		return false;
 	}
@@ -530,12 +476,12 @@ static bool query_root_pointer_position(struct wc_server *s, int16_t *x, int16_t
 	return true;
 }
 
-#define WC_DRAG_THROTTLE_MS 16
+#define WLX_DRAG_THROTTLE_MS 16
 
 /* ICCCM ConfigureRequest target: the real client window, not the WM
  * frame. The WM intercepts the request and moves/resizes the frame.
  * Falls back to xwin when content is unknown. */
-static xcb_window_t configure_target_window(struct wc_window *win) {
+static xcb_window_t configure_target_window(struct wlx_window *win) {
 	return ewmh_target_window(win);
 }
 
@@ -544,15 +490,15 @@ static xcb_window_t configure_target_window(struct wc_window *win) {
  * desired root position of this outer corner (ICCCM §4.1.5), so we must
  * measure the frame — not the content origin below the titlebar — or the
  * window jumps by exactly the titlebar/border inset on the first update. */
-static xcb_window_t outer_position_window(struct wc_window *win) {
+static xcb_window_t outer_position_window(struct wlx_window *win) {
 	if (win->xwin != XCB_WINDOW_NONE) {
 		return win->xwin;
 	}
 	return win->content_xwin;
 }
 
-static void begin_interactive_move(struct wc_window *win) {
-	struct wc_server *server = win->server;
+static void begin_interactive_move(struct wlx_window *win) {
+	struct wlx_server *server = win->server;
 	xcb_window_t outer = outer_position_window(win);
 	xcb_window_t target = configure_target_window(win);
 	int16_t wx, wy, px, py;
@@ -578,8 +524,8 @@ static void begin_interactive_move(struct wc_window *win) {
 		server->move_offset_x, server->move_offset_y);
 }
 
-static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
-	struct wc_server *server = win->server;
+static void begin_interactive_resize(struct wlx_window *win, uint32_t edges) {
+	struct wlx_server *server = win->server;
 	xcb_window_t outer = outer_position_window(win);
 	xcb_window_t target = configure_target_window(win);
 	/* Size must be the client (content) size: ConfigureRequest width/
@@ -617,13 +563,13 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 
 static void toplevel_request_move(struct wl_listener *listener, void *data) {
 	(void)data;
-	struct wc_window *win = wl_container_of(listener, win, request_move);
+	struct wlx_window *win = wl_container_of(listener, win, request_move);
 	wlr_log(WLR_INFO, "toplevel requested move");
 	begin_interactive_move(win);
 }
 
 static void toplevel_request_resize(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, request_resize);
+	struct wlx_window *win = wl_container_of(listener, win, request_resize);
 	struct wlr_xdg_toplevel_resize_event *event = data;
 	wlr_log(WLR_INFO, "toplevel requested resize (edges 0x%x)", event->edges);
 	begin_interactive_resize(win, event->edges);
@@ -631,7 +577,7 @@ static void toplevel_request_resize(struct wl_listener *listener, void *data) {
 
 static void toplevel_request_maximize(struct wl_listener *listener, void *data) {
 	(void)data;
-	struct wc_window *win = wl_container_of(listener, win, request_maximize);
+	struct wlx_window *win = wl_container_of(listener, win, request_maximize);
 	bool want = win->toplevel->requested.maximized;
 	xcb_window_t target = ewmh_target_window(win);
 
@@ -670,7 +616,7 @@ static void toplevel_request_maximize(struct wl_listener *listener, void *data) 
 
 static void toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
 	(void)data;
-	struct wc_window *win = wl_container_of(listener, win, request_fullscreen);
+	struct wlx_window *win = wl_container_of(listener, win, request_fullscreen);
 	bool want = win->toplevel->requested.fullscreen;
 	xcb_window_t target = ewmh_target_window(win);
 
@@ -694,7 +640,7 @@ static void toplevel_request_fullscreen(struct wl_listener *listener, void *data
 
 static void toplevel_request_minimize(struct wl_listener *listener, void *data) {
 	(void)data;
-	struct wc_window *win = wl_container_of(listener, win, request_minimize);
+	struct wlx_window *win = wl_container_of(listener, win, request_minimize);
 	xcb_window_t target = ewmh_target_window(win);
 	if (target == XCB_WINDOW_NONE) {
 		return;
@@ -722,8 +668,8 @@ static void toplevel_request_minimize(struct wl_listener *listener, void *data) 
 /* Output (== one X11 window) lifecycle                                 */
 /* ------------------------------------------------------------------- */
 
-static struct wc_window *window_from_xwin(struct wc_server *server, xcb_window_t w) {
-	struct wc_window *win;
+static struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w) {
+	struct wlx_window *win;
 	wl_list_for_each(win, &server->windows, link) {
 		if (win->xwin == w) {
 			return win;
@@ -737,7 +683,7 @@ static struct wc_window *window_from_xwin(struct wc_server *server, xcb_window_t
 	return NULL;
 }
 
-static void select_window_events(struct wc_server *server, xcb_window_t w) {
+static void select_window_events(struct wlx_server *server, xcb_window_t w) {
 	if (!server->xcb || xcb_connection_has_error(server->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
@@ -767,17 +713,17 @@ static void select_window_events(struct wc_server *server, xcb_window_t w) {
  * Resize is also deliberately NOT handled here -- see
  * output_request_state(), which uses wlroots' own (correct) mechanism
  * instead of us watching ConfigureNotify ourselves. */
-static void register_x11_window_subtree(struct wc_window *win, xcb_window_t w) {
-	struct wc_server *server = win->server;
+static void register_x11_window_subtree(struct wlx_window *win, xcb_window_t w) {
+	struct wlx_server *server = win->server;
 
 	select_window_events(server, w);
 	wlr_log(WLR_INFO, "registered X11 window 0x%x for toplevel \"%s\"",
 		w, win->toplevel && win->toplevel->title ? win->toplevel->title : "?");
 
-	if (win->related_count < WC_MAX_RELATED_WINDOWS) {
+	if (win->related_count < WLX_MAX_RELATED_WINDOWS) {
 		win->related[win->related_count++] = w;
 	} else {
-		wlr_log(WLR_ERROR, "window subtree exceeds WC_MAX_RELATED_WINDOWS, "
+		wlr_log(WLR_ERROR, "window subtree exceeds WLX_MAX_RELATED_WINDOWS, "
 			"some descendants won't get focus handling");
 	}
 
@@ -801,7 +747,7 @@ static void register_x11_window_subtree(struct wc_window *win, xcb_window_t w) {
  * that window among the registered subtree: it's overwhelmingly the
  * largest-area descendant, since decoration widgets (title bar strip,
  * borders, buttons) are comparatively tiny. */
-static xcb_window_t find_content_window(struct wc_server *server, struct wc_window *win) {
+static xcb_window_t find_content_window(struct wlx_server *server, struct wlx_window *win) {
 	xcb_window_t best = XCB_WINDOW_NONE;
 	uint32_t best_area = 0;
 
@@ -868,7 +814,7 @@ static xcb_window_t find_content_window(struct wc_server *server, struct wc_wind
  * feed back on itself. This replaces all of our own ConfigureNotify-based
  * resize detection. */
 static void output_request_state(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, output_request_state);
+	struct wlx_window *win = wl_container_of(listener, win, output_request_state);
 	const struct wlr_output_event_request_state *event = data;
 
 	wlr_log(WLR_INFO, "output requested state (backend-detected resize) "
@@ -885,7 +831,7 @@ static void output_request_state(struct wl_listener *listener, void *data) {
  * wl_seat keyboard focus from the host WM's real X11 focus, rather than
  * from our own pointer-hover heuristics. This keeps "this window is
  * focused" meaning the same thing at the X11 level and the Wayland level. */
-static void set_active_window(struct wc_server *server, struct wc_window *win) {
+static void set_active_window(struct wlx_server *server, struct wlx_window *win) {
 	if (server->focused_window == win) {
 		return;
 	}
@@ -910,14 +856,14 @@ static void set_active_window(struct wc_server *server, struct wc_window *win) {
 static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	(void)fd;
 	(void)mask;
-	struct wc_server *server = data;
+	struct wlx_server *server = data;
 
 	xcb_generic_event_t *event;
 	while ((event = xcb_poll_for_event(server->xcb)) != NULL) {
 		uint8_t type = event->response_type & ~0x80;
 		if (type == XCB_FOCUS_IN) {
 			xcb_focus_in_event_t *fi = (xcb_focus_in_event_t *)event;
-			struct wc_window *win = window_from_xwin(server, fi->event);
+			struct wlx_window *win = window_from_xwin(server, fi->event);
 			if (win) {
 				wlr_log(WLR_INFO, "X11 FocusIn on window 0x%x", fi->event);
 				set_active_window(server, win);
@@ -928,7 +874,7 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			 * content window or a decoration child, not only the frame.
 			 * detail == Inferior means focus moved to a child of this
 			 * window (still inside our toplevel subtree) — do not clear. */
-			struct wc_window *win = window_from_xwin(server, fo->event);
+			struct wlx_window *win = window_from_xwin(server, fo->event);
 			if (win && server->focused_window == win &&
 					fo->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
 				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x (detail %u)",
@@ -941,7 +887,7 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			 * subtree so related[] tracks decoration widgets too. */
 			xcb_reparent_notify_event_t *rn =
 				(xcb_reparent_notify_event_t *)event;
-			struct wc_window *win = window_from_xwin(server, rn->window);
+			struct wlx_window *win = window_from_xwin(server, rn->window);
 			if (win && win->xwin != XCB_WINDOW_NONE) {
 				wlr_log(WLR_INFO, "X11 ReparentNotify for 0x%x (parent 0x%x) "
 					"on toplevel \"%s\" — refreshing window subtree",
@@ -966,18 +912,17 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				} else if (win->content_xwin == XCB_WINDOW_NONE) {
 					win->content_xwin = win->xwin;
 				}
-				xwin_set_default_cursor(server, win->content_xwin);
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
 			/* Learn the WM's systematic position discrepancy from real
-			 * feedback (see the comment on struct wc_server's
+			 * feedback (see the comment on struct wlx_server's
 			 * drag_correction_x field) rather than assuming a fixed
 			 * value, since it's WM-theme-specific. Match against the
 			 * same window we actually configure (content when known). */
 			if (server->move_win || server->resize_win) {
 				xcb_configure_notify_event_t *cn =
 					(xcb_configure_notify_event_t *)event;
-				struct wc_window *active =
+				struct wlx_window *active =
 					server->move_win ? server->move_win : server->resize_win;
 				xcb_window_t target = ewmh_target_window(active);
 				if (cn->window == target || cn->window == active->xwin) {
@@ -1014,20 +959,11 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 }
 
 static void output_frame(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, output_frame);
+	struct wlx_window *win = wl_container_of(listener, win, output_frame);
 	if (!win->scene_output) {
 		return;
 	}
 	wlr_scene_output_commit(win->scene_output, NULL);
-
-	/* wlroots' X11 backend appears to keep resetting the window's cursor
-	 * back to invisible on its own (a one-shot set right after window
-	 * creation didn't stick), so keep re-asserting a normal cursor every
-	 * frame. This is a cheap XChangeWindowAttributes call and is a
-	 * brute-force fix regardless of exactly when/why the backend resets
-	 * it. Only on the content window, not the frame -- xfwm4 needs to
-	 * keep control of its own decoration cursors (resize arrows, etc). */
-	xwin_set_default_cursor(win->server, win->content_xwin);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1035,7 +971,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 }
 
 static void output_commit(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, output_commit);
+	struct wlx_window *win = wl_container_of(listener, win, output_commit);
 	(void)data;
 
 	wlr_log(WLR_INFO, "output commit event (current size %dx%d, last known %dx%d)",
@@ -1060,7 +996,7 @@ static void output_commit(struct wl_listener *listener, void *data) {
 }
 
 static void output_destroy(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, output_destroy);
+	struct wlx_window *win = wl_container_of(listener, win, output_destroy);
 
 	/* This fires both when the host WM closes the X11 window (wlroots'
 	 * X11 backend treats that like unplugging a monitor) and when we
@@ -1099,11 +1035,11 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	}
 }
 
-#define WC_DEFAULT_WIDTH 1024
-#define WC_DEFAULT_HEIGHT 720
+#define WLX_DEFAULT_WIDTH 1024
+#define WLX_DEFAULT_HEIGHT 720
 
-static void create_output_for_window(struct wc_window *win) {
-	struct wc_server *server = win->server;
+static void create_output_for_window(struct wlx_window *win) {
+	struct wlx_server *server = win->server;
 
 	wlr_log(WLR_INFO, "mapping toplevel \"%s\" (app_id \"%s\") to a new X11 window",
 		win->toplevel->title ? win->toplevel->title : "(no title)",
@@ -1149,9 +1085,9 @@ static void create_output_for_window(struct wc_window *win) {
 		wlr_output_state_set_mode(&state, mode);
 	} else {
 		wlr_log(WLR_INFO, "no preferred mode reported; using custom mode %dx%d",
-			WC_DEFAULT_WIDTH, WC_DEFAULT_HEIGHT);
-		wlr_output_state_set_custom_mode(&state, WC_DEFAULT_WIDTH,
-			WC_DEFAULT_HEIGHT, 0);
+			WLX_DEFAULT_WIDTH, WLX_DEFAULT_HEIGHT);
+		wlr_output_state_set_custom_mode(&state, WLX_DEFAULT_WIDTH,
+			WLX_DEFAULT_HEIGHT, 0);
 	}
 
 	if (!wlr_output_commit_state(output, &state)) {
@@ -1188,8 +1124,8 @@ static void create_output_for_window(struct wc_window *win) {
 	win->output_request_state.notify = output_request_state;
 	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
-	int w = output->width > 0 ? output->width : WC_DEFAULT_WIDTH;
-	int h = output->height > 0 ? output->height : WC_DEFAULT_HEIGHT;
+	int w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
+	int h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
 	wlr_xdg_toplevel_set_size(win->toplevel, w, h);
 
 	/* Best-effort: find the xcb_window_t the backend just created so we
@@ -1203,8 +1139,8 @@ static void create_output_for_window(struct wc_window *win) {
 
 	win->xwin = XCB_WINDOW_NONE;
 	xcb_window_t fallback = XCB_WINDOW_NONE;
-	int want_w = output->width > 0 ? output->width : WC_DEFAULT_WIDTH;
-	int want_h = output->height > 0 ? output->height : WC_DEFAULT_HEIGHT;
+	int want_w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
+	int want_h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
 	for (int i = 0; i < after_n; i++) {
 		bool seen = false;
 		for (int j = 0; j < before_n; j++) {
@@ -1243,7 +1179,6 @@ static void create_output_for_window(struct wc_window *win) {
 		if (win->content_xwin == XCB_WINDOW_NONE) {
 			win->content_xwin = win->xwin;
 		}
-		xwin_set_default_cursor(server, win->content_xwin);
 		/* Set on both: the frame (win->xwin), since that's what xfwm4
 		 * appears to actually display, and the content window (the
 		 * correct ICCCM target), for robustness across other WMs/tools
@@ -1267,7 +1202,7 @@ static void create_output_for_window(struct wc_window *win) {
 /* ------------------------------------------------------------------- */
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, map);
+	struct wlx_window *win = wl_container_of(listener, win, map);
 	wlr_log(WLR_INFO, "surface map event received");
 	if (win->output) {
 		return; /* already has a window (e.g. re-map) */
@@ -1276,7 +1211,7 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, unmap);
+	struct wlx_window *win = wl_container_of(listener, win, unmap);
 	if (win->output) {
 		/* wlr_output_destroy() synchronously fires events.destroy,
 		 * which runs output_destroy() above and clears win->output. */
@@ -1285,7 +1220,7 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 }
 
 static void surface_commit(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, commit);
+	struct wlx_window *win = wl_container_of(listener, win, commit);
 	wlr_log(WLR_INFO, "surface commit (mapped=%d, has_buffer=%d)",
 		win->output != NULL,
 		win->toplevel->base->surface->buffer != NULL);
@@ -1331,7 +1266,7 @@ static void surface_commit(struct wl_listener *listener, void *data) {
 }
 
 static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
-	struct wc_window *win = wl_container_of(listener, win, destroy);
+	struct wlx_window *win = wl_container_of(listener, win, destroy);
 
 	if (win->output) {
 		wlr_output_destroy(win->output);
@@ -1359,7 +1294,7 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	free(win);
 }
 
-struct wc_decoration {
+struct wlx_decoration {
 	struct wl_listener request_mode;
 	struct wl_listener destroy;
 };
@@ -1380,7 +1315,7 @@ static void decoration_request_mode(struct wl_listener *listener, void *data) {
 	 * trips the same "surface->initialized" assertion inside wlroots
 	 * that calling wlr_xdg_surface_schedule_configure() too early does
 	 * (see surface_commit() below) -- so defer it the same way. */
-	struct wc_window *win = decoration->toplevel->base->data;
+	struct wlx_window *win = decoration->toplevel->base->data;
 	if (win && !win->initial_configure_sent) {
 		win->pending_decoration = decoration;
 		return;
@@ -1391,10 +1326,10 @@ static void decoration_request_mode(struct wl_listener *listener, void *data) {
 
 static void decoration_destroy(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	struct wc_decoration *deco = wl_container_of(listener, deco, destroy);
+	struct wlx_decoration *deco = wl_container_of(listener, deco, destroy);
 
 	if (decoration && decoration->toplevel) {
-		struct wc_window *win = decoration->toplevel->base->data;
+		struct wlx_window *win = decoration->toplevel->base->data;
 		if (win && win->pending_decoration == decoration) {
 			win->pending_decoration = NULL;
 		}
@@ -1409,7 +1344,7 @@ static void server_new_toplevel_decoration(struct wl_listener *listener, void *d
 	(void)listener;
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
 
-	struct wc_decoration *deco = calloc(1, sizeof(*deco));
+	struct wlx_decoration *deco = calloc(1, sizeof(*deco));
 	if (!deco) {
 		wlr_log(WLR_ERROR, "out of memory allocating decoration tracker");
 		return;
@@ -1421,7 +1356,7 @@ static void server_new_toplevel_decoration(struct wl_listener *listener, void *d
 
 	wlr_log(WLR_INFO, "new xdg toplevel decoration object -> forcing server-side mode");
 
-	struct wc_window *win = decoration->toplevel->base->data;
+	struct wlx_window *win = decoration->toplevel->base->data;
 	if (win && !win->initial_configure_sent) {
 		win->pending_decoration = decoration;
 		return;
@@ -1431,14 +1366,14 @@ static void server_new_toplevel_decoration(struct wl_listener *listener, void *d
 }
 
 static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, new_xdg_toplevel);
+	struct wlx_server *server = wl_container_of(listener, server, new_xdg_toplevel);
 	struct wlr_xdg_toplevel *toplevel = data;
 
 	wlr_log(WLR_INFO, "new xdg_toplevel created (not yet mapped)");
 
-	struct wc_window *win = calloc(1, sizeof(*win));
+	struct wlx_window *win = calloc(1, sizeof(*win));
 	if (!win) {
-		wlr_log(WLR_ERROR, "out of memory allocating wc_window");
+		wlr_log(WLR_ERROR, "out of memory allocating wlx_window");
 		return;
 	}
 	win->server = server;
@@ -1477,7 +1412,7 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 /* Input                                                                 */
 /* ------------------------------------------------------------------- */
 
-static struct wlr_surface *surface_at_cursor(struct wc_server *server,
+static struct wlr_surface *surface_at_cursor(struct wlx_server *server,
 		double *sx, double *sy) {
 	struct wlr_scene_node *node = wlr_scene_node_at(&server->scene->tree.node,
 		server->cursor->x, server->cursor->y, sx, sy);
@@ -1495,19 +1430,19 @@ static struct wlr_surface *surface_at_cursor(struct wc_server *server,
 
 /* Returns true if enough time has passed since the last actual
  * xcb_configure_window() call that we should send another one now. */
-static bool drag_throttle_ready(struct wc_server *server) {
+static bool drag_throttle_ready(struct wlx_server *server) {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	long elapsed_ms = (now.tv_sec - server->drag_last_send_at.tv_sec) * 1000 +
 		(now.tv_nsec - server->drag_last_send_at.tv_nsec) / 1000000;
-	if (elapsed_ms < WC_DRAG_THROTTLE_MS) {
+	if (elapsed_ms < WLX_DRAG_THROTTLE_MS) {
 		return false;
 	}
 	server->drag_last_send_at = now;
 	return true;
 }
 
-#define WC_MIN_WINDOW_SIZE 50
+#define WLX_MIN_WINDOW_SIZE 50
 
 /* Called whenever we get any pointer motion at all while a drag is
  * active; throttled to avoid flooding xfwm4's asynchronous
@@ -1515,7 +1450,7 @@ static bool drag_throttle_ready(struct wc_server *server) {
  * re-queries the real pointer position fresh (see
  * query_root_pointer_position()) rather than trusting any accumulated
  * state, so a single noisy sample can't corrupt anything beyond itself. */
-static void update_interactive_drag(struct wc_server *server) {
+static void update_interactive_drag(struct wlx_server *server) {
 	if (!server->move_win && !server->resize_win) {
 		return;
 	}
@@ -1574,11 +1509,11 @@ static void update_interactive_drag(struct wc_server *server) {
 	} else if (server->resize_edges & WLR_EDGE_BOTTOM) {
 		h += dy;
 	}
-	if (w < WC_MIN_WINDOW_SIZE) {
-		w = WC_MIN_WINDOW_SIZE;
+	if (w < WLX_MIN_WINDOW_SIZE) {
+		w = WLX_MIN_WINDOW_SIZE;
 	}
-	if (h < WC_MIN_WINDOW_SIZE) {
-		h = WC_MIN_WINDOW_SIZE;
+	if (h < WLX_MIN_WINDOW_SIZE) {
+		h = WLX_MIN_WINDOW_SIZE;
 	}
 	x -= server->drag_correction_x;
 	y -= server->drag_correction_y;
@@ -1598,7 +1533,13 @@ static void update_interactive_drag(struct wc_server *server) {
 	xcb_flush(server->xcb);
 }
 
-static void process_cursor_motion(struct wc_server *server, uint32_t time_msec) {
+static void reset_cursor_to_default(struct wlx_server *server) {
+	if (server->cursor_mgr) {
+		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "left_ptr");
+	}
+}
+
+static void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 	if (server->move_win || server->resize_win) {
 		update_interactive_drag(server);
 		return;
@@ -1611,11 +1552,35 @@ static void process_cursor_motion(struct wc_server *server, uint32_t time_msec) 
 		wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
 	} else {
 		wlr_seat_pointer_clear_focus(server->seat);
+		/* No client surface under the pointer — show the theme default.
+		 * Clients set their own cursor via request_set_cursor while focused. */
+		reset_cursor_to_default(server);
 	}
 }
 
+/* Client called wl_pointer.set_cursor. Honour it only when that client
+ * currently has pointer focus (protocol rule). surface == NULL means
+ * hide the cursor; otherwise the surface's buffer becomes the image via
+ * the X11 backend's output-cursor path. */
+static void server_seat_request_cursor(struct wl_listener *listener, void *data) {
+	struct wlx_server *server =
+		wl_container_of(listener, server, request_set_cursor);
+	struct wlr_seat_pointer_request_set_cursor_event *event = data;
+
+	struct wlr_seat_client *focused =
+		server->seat->pointer_state.focused_client;
+	if (event->seat_client != focused) {
+		return;
+	}
+
+	/* surface == NULL hides the cursor (protocol). Otherwise the X11
+	 * backend installs the surface buffer as the window's X cursor. */
+	wlr_cursor_set_surface(server->cursor, event->surface,
+		event->hotspot_x, event->hotspot_y);
+}
+
 static void server_cursor_motion(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, cursor_motion);
+	struct wlx_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *event = data;
 	wlr_cursor_move(server->cursor, &event->pointer->base,
 		event->delta_x, event->delta_y);
@@ -1623,7 +1588,7 @@ static void server_cursor_motion(struct wl_listener *listener, void *data) {
 }
 
 static void server_cursor_motion_absolute(struct wl_listener *listener, void *data) {
-	struct wc_server *server =
+	struct wlx_server *server =
 		wl_container_of(listener, server, cursor_motion_absolute);
 	struct wlr_pointer_motion_absolute_event *event = data;
 	wlr_cursor_warp_absolute(server->cursor, &event->pointer->base,
@@ -1631,7 +1596,7 @@ static void server_cursor_motion_absolute(struct wl_listener *listener, void *da
 	process_cursor_motion(server, event->time_msec);
 }
 
-static struct wc_window *window_from_surface(struct wlr_surface *surface) {
+static struct wlx_window *window_from_surface(struct wlr_surface *surface) {
 	struct wlr_xdg_surface *xdg_surface = wlr_xdg_surface_try_from_wlr_surface(surface);
 	if (!xdg_surface || xdg_surface->role != WLR_XDG_SURFACE_ROLE_TOPLEVEL) {
 		return NULL;
@@ -1640,7 +1605,7 @@ static struct wc_window *window_from_surface(struct wlr_surface *surface) {
 }
 
 static void server_cursor_button(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, cursor_button);
+	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
 
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
@@ -1669,14 +1634,14 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	 * FocusIn we'd handle anyway; this is a same-path fallback for that,
 	 * routed through set_active_window() so it can't drift out of sync
 	 * with the ACTIVATED/keyboard-focus state that drives. */
-	struct wc_window *win = window_from_surface(surface);
+	struct wlx_window *win = window_from_surface(surface);
 	if (win) {
 		set_active_window(server, win);
 	}
 }
 
 static void server_cursor_axis(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, cursor_axis);
+	struct wlx_server *server = wl_container_of(listener, server, cursor_axis);
 	struct wlr_pointer_axis_event *event = data;
 	wlr_seat_pointer_notify_axis(server->seat, event->time_msec,
 		event->orientation, event->delta, event->delta_discrete,
@@ -1684,18 +1649,18 @@ static void server_cursor_axis(struct wl_listener *listener, void *data) {
 }
 
 static void server_cursor_frame(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, cursor_frame);
+	struct wlx_server *server = wl_container_of(listener, server, cursor_frame);
 	wlr_seat_pointer_notify_frame(server->seat);
 }
 
 static void keyboard_modifiers(struct wl_listener *listener, void *data) {
-	struct wc_keyboard *kb = wl_container_of(listener, kb, modifiers);
+	struct wlx_keyboard *kb = wl_container_of(listener, kb, modifiers);
 	wlr_seat_set_keyboard(kb->server->seat, kb->wlr_keyboard);
 	wlr_seat_keyboard_notify_modifiers(kb->server->seat, &kb->wlr_keyboard->modifiers);
 }
 
 static void keyboard_key(struct wl_listener *listener, void *data) {
-	struct wc_keyboard *kb = wl_container_of(listener, kb, key);
+	struct wlx_keyboard *kb = wl_container_of(listener, kb, key);
 	struct wlr_keyboard_key_event *event = data;
 	wlr_seat_set_keyboard(kb->server->seat, kb->wlr_keyboard);
 	wlr_seat_keyboard_notify_key(kb->server->seat, event->time_msec,
@@ -1703,7 +1668,7 @@ static void keyboard_key(struct wl_listener *listener, void *data) {
 }
 
 static void keyboard_destroy(struct wl_listener *listener, void *data) {
-	struct wc_keyboard *kb = wl_container_of(listener, kb, destroy);
+	struct wlx_keyboard *kb = wl_container_of(listener, kb, destroy);
 	wl_list_remove(&kb->modifiers.link);
 	wl_list_remove(&kb->key.link);
 	wl_list_remove(&kb->destroy.link);
@@ -1711,7 +1676,7 @@ static void keyboard_destroy(struct wl_listener *listener, void *data) {
 }
 
 static void server_new_input(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, new_input);
+	struct wlx_server *server = wl_container_of(listener, server, new_input);
 	struct wlr_input_device *device = data;
 
 	switch (device->type) {
@@ -1726,7 +1691,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		xkb_context_unref(ctx);
 		wlr_keyboard_set_repeat_info(wlr_kb, 25, 600);
 
-		struct wc_keyboard *kb = calloc(1, sizeof(*kb));
+		struct wlx_keyboard *kb = calloc(1, sizeof(*kb));
 		if (!kb) {
 			wlr_log(WLR_ERROR, "out of memory allocating keyboard tracker");
 			break;
@@ -1763,7 +1728,7 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 }
 
 static void server_request_set_selection(struct wl_listener *listener, void *data) {
-	struct wc_server *server =
+	struct wlx_server *server =
 		wl_container_of(listener, server, request_set_selection);
 	struct wlr_seat_request_set_selection_event *event = data;
 	wlr_seat_set_selection(server->seat, event->source, event->serial);
@@ -1794,19 +1759,19 @@ static int handle_sigchld(int signal_number, void *data) {
 }
 
 /* ------------------------------------------------------------------- */
-/* `wc-x11 <command>`: launch a client alongside the compositor, and    */
+/* `wl-x11 <command>`: launch a client alongside the compositor, and    */
 /* shut down once no Wayland clients remain connected                  */
 /* ------------------------------------------------------------------- */
 
-struct wc_client_track {
-	struct wc_server *server;
+struct wlx_client_track {
+	struct wlx_server *server;
 	struct wl_listener destroy;
 };
 
 static void client_destroy_notify(struct wl_listener *listener, void *data) {
 	(void)data;
-	struct wc_client_track *track = wl_container_of(listener, track, destroy);
-	struct wc_server *server = track->server;
+	struct wlx_client_track *track = wl_container_of(listener, track, destroy);
+	struct wlx_server *server = track->server;
 
 	server->active_clients--;
 	wlr_log(WLR_INFO, "wayland client disconnected (%d remaining)",
@@ -1824,7 +1789,7 @@ static void client_destroy_notify(struct wl_listener *listener, void *data) {
 }
 
 static void client_created_notify(struct wl_listener *listener, void *data) {
-	struct wc_server *server = wl_container_of(listener, server, client_created);
+	struct wlx_server *server = wl_container_of(listener, server, client_created);
 	struct wl_client *client = data;
 
 	server->active_clients++;
@@ -1832,7 +1797,7 @@ static void client_created_notify(struct wl_listener *listener, void *data) {
 	wlr_log(WLR_INFO, "wayland client connected (%d active)",
 		server->active_clients);
 
-	struct wc_client_track *track = calloc(1, sizeof(*track));
+	struct wlx_client_track *track = calloc(1, sizeof(*track));
 	if (!track) {
 		wlr_log(WLR_ERROR, "out of memory allocating client tracker");
 		return;
@@ -1853,7 +1818,7 @@ int main(int argc, char **argv) {
 		if (strcmp(argv[i], "--debug") == 0) {
 			debug = true;
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			printf("usage: wc-x11 [--debug] [command [args...]]\n"
+			printf("usage: wl-x11 [--debug] [command [args...]]\n"
 				"  --debug             print verbose diagnostic logging "
 				"(default: only errors)\n"
 				"  command [args...]   also launch this program with "
@@ -1863,7 +1828,7 @@ int main(int argc, char **argv) {
 			return 0;
 		} else {
 			/* First non-flag argument: everything from here on is the
-			 * command to launch, not further wc-x11 flags. */
+			 * command to launch, not further wl-x11 flags. */
 			command_argv = &argv[i];
 			break;
 		}
@@ -1879,34 +1844,34 @@ int main(int argc, char **argv) {
 	const char *x11_display = getenv("DISPLAY");
 	if (!x11_display) {
 		fprintf(stderr,
-			"wc-x11: $DISPLAY is not set. This compositor must be run "
+			"wl-x11: $DISPLAY is not set. This compositor must be run "
 			"inside an existing X11 session (e.g. from an xterm on your "
 			"desktop, or via `xinit`).\n");
 		return 1;
 	}
 
-	struct wc_server server = {0};
+	struct wlx_server server = {0};
 	server.wl_display = wl_display_create();
 	struct wl_event_loop *loop = wl_display_get_event_loop(server.wl_display);
 	server.loop = loop;
 
 	server.backend = wlr_x11_backend_create(loop, x11_display);
 	if (!server.backend) {
-		fprintf(stderr, "wc-x11: failed to create X11 backend for DISPLAY=%s\n",
+		fprintf(stderr, "wl-x11: failed to create X11 backend for DISPLAY=%s\n",
 			x11_display);
 		return 1;
 	}
 
 	server.renderer = wlr_renderer_autocreate(server.backend);
 	if (!server.renderer) {
-		fprintf(stderr, "wc-x11: failed to create renderer\n");
+		fprintf(stderr, "wl-x11: failed to create renderer\n");
 		return 1;
 	}
 	wlr_renderer_init_wl_display(server.renderer, server.wl_display);
 
 	server.allocator = wlr_allocator_autocreate(server.backend, server.renderer);
 	if (!server.allocator) {
-		fprintf(stderr, "wc-x11: failed to create allocator\n");
+		fprintf(stderr, "wl-x11: failed to create allocator\n");
 		return 1;
 	}
 
@@ -1934,6 +1899,17 @@ int main(int argc, char **argv) {
 	server.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
 
+	/* Theme cursors for the default arrow; client buffers override this
+	 * via request_set_cursor → wlr_cursor_set_surface (X11 backend turns
+	 * that into a real X cursor on the output window). */
+	server.cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+	if (server.cursor_mgr) {
+		wlr_xcursor_manager_load(server.cursor_mgr, 1);
+		wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "left_ptr");
+	} else {
+		wlr_log(WLR_ERROR, "failed to create xcursor manager; pointer may stay invisible until a client sets one");
+	}
+
 	server.new_input.notify = server_new_input;
 	wl_signal_add(&server.backend->events.new_input, &server.new_input);
 
@@ -1949,6 +1925,9 @@ int main(int argc, char **argv) {
 	server.cursor_frame.notify = server_cursor_frame;
 	wl_signal_add(&server.cursor->events.frame, &server.cursor_frame);
 
+	server.request_set_cursor.notify = server_seat_request_cursor;
+	wl_signal_add(&server.seat->events.request_set_cursor,
+		&server.request_set_cursor);
 	server.request_set_selection.notify = server_request_set_selection;
 	wl_signal_add(&server.seat->events.request_set_selection,
 		&server.request_set_selection);
@@ -1985,19 +1964,18 @@ int main(int argc, char **argv) {
 			server.atom_net_wm_state_maximized_vert,
 			server.atom_net_wm_state_maximized_horz,
 			server.atom_net_wm_state_fullscreen, server.atom_wm_change_state);
-		server.default_cursor = create_default_cursor(server.xcb, screen);
 		wl_event_loop_add_fd(loop, xcb_get_file_descriptor(server.xcb),
 			WL_EVENT_READABLE, handle_xcb_readable, &server);
 	}
 
 	const char *socket = wl_display_add_socket_auto(server.wl_display);
 	if (!socket) {
-		fprintf(stderr, "wc-x11: failed to create Wayland socket\n");
+		fprintf(stderr, "wl-x11: failed to create Wayland socket\n");
 		return 1;
 	}
 
 	if (!wlr_backend_start(server.backend)) {
-		fprintf(stderr, "wc-x11: failed to start X11 backend\n");
+		fprintf(stderr, "wl-x11: failed to start X11 backend\n");
 		wl_display_destroy(server.wl_display);
 		return 1;
 	}
@@ -2022,11 +2000,11 @@ int main(int argc, char **argv) {
 			/* Child: WAYLAND_DISPLAY was set via setenv() above, so it's
 			 * already inherited through environ; just exec. */
 			execvp(command_argv[0], command_argv);
-			fprintf(stderr, "wc-x11: failed to exec '%s': %s\n",
+			fprintf(stderr, "wl-x11: failed to exec '%s': %s\n",
 				command_argv[0], strerror(errno));
 			_exit(127);
 		} else if (pid < 0) {
-			fprintf(stderr, "wc-x11: fork() failed: %s\n", strerror(errno));
+			fprintf(stderr, "wl-x11: fork() failed: %s\n", strerror(errno));
 			server.exit_when_clients_gone = false;
 		} else {
 			server.launched_pid = pid;
@@ -2036,17 +2014,17 @@ int main(int argc, char **argv) {
 	}
 
 	fprintf(stderr,
-		"wc-x11: running. WAYLAND_DISPLAY=%s (nested inside X11 DISPLAY=%s)\n",
+		"wl-x11: running. WAYLAND_DISPLAY=%s (nested inside X11 DISPLAY=%s)\n",
 		socket, x11_display);
 	if (command_argv) {
 		fprintf(stderr,
-			"wc-x11: launched '%s'; will exit once no Wayland clients "
+			"wl-x11: launched '%s'; will exit once no Wayland clients "
 			"remain connected\n", command_argv[0]);
 	} else {
 		fprintf(stderr,
-			"wc-x11: start clients with, e.g.:\n"
-			"wc-x11:   WAYLAND_DISPLAY=%s weston-terminal\n"
-			"wc-x11:   WAYLAND_DISPLAY=%s foot\n",
+			"wl-x11: start clients with, e.g.:\n"
+			"wl-x11:   WAYLAND_DISPLAY=%s weston-terminal\n"
+			"wl-x11:   WAYLAND_DISPLAY=%s foot\n",
 			socket, socket);
 	}
 
@@ -2073,6 +2051,7 @@ int main(int argc, char **argv) {
 	wl_list_remove(&server.cursor_button.link);
 	wl_list_remove(&server.cursor_axis.link);
 	wl_list_remove(&server.cursor_frame.link);
+	wl_list_remove(&server.request_set_cursor.link);
 	wl_list_remove(&server.request_set_selection.link);
 
 	if (server.sigint_source) {
@@ -2087,12 +2066,12 @@ int main(int argc, char **argv) {
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_cursor_destroy(server.cursor);
 	server.cursor = NULL;
+	if (server.cursor_mgr) {
+		wlr_xcursor_manager_destroy(server.cursor_mgr);
+		server.cursor_mgr = NULL;
+	}
 
 	if (server.xcb) {
-		if (server.default_cursor != 0) {
-			xcb_free_cursor(server.xcb, server.default_cursor);
-			server.default_cursor = 0;
-		}
 		xcb_disconnect(server.xcb);
 		server.xcb = NULL;
 	}

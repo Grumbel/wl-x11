@@ -1,5 +1,5 @@
 {
-  description = "wc-x11: a minimal wlroots Wayland compositor nested under X11, mapping one Wayland toplevel to one X11 window";
+  description = "wl-x11: a minimal wlroots Wayland compositor nested under X11, mapping one Wayland toplevel to one X11 window";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,7 +13,7 @@
       in
       {
         packages.default = pkgs.stdenv.mkDerivation {
-          pname = "wc-x11";
+          pname = "wl-x11";
           version = "0.1.0";
           src = ./.;
 
@@ -35,21 +35,20 @@
             libxkbcommon
             pixman
             libxcb
-            xcb-util-cursor
           ];
 
           meta = with pkgs.lib; {
             description = "Minimal wlroots-based Wayland compositor nested in X11, one X11 window per Wayland toplevel";
-            homepage = "https://example.invalid/wc-x11";
+            homepage = "https://example.invalid/wl-x11";
             license = licenses.mit;
             platforms = platforms.linux;
-            mainProgram = "wc-x11";
+            mainProgram = "wl-x11";
           };
         };
 
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/wc-x11";
+          program = "${self.packages.${system}.default}/bin/wl-x11";
         };
 
         devShells.default = pkgs.mkShell {
@@ -66,12 +65,11 @@
             libxkbcommon
             pixman
             libxcb
-            xcb-util-cursor
           ];
 
           shellHook = ''
-            echo "wc-x11 dev shell. Build with: meson setup build && ninja -C build"
-            echo "Run with:   DISPLAY=:0 ./build/wc-x11"
+            echo "wl-x11 dev shell. Build with: meson setup build && ninja -C build"
+            echo "Run with:   DISPLAY=:0 ./build/wl-x11"
           '';
         };
       });

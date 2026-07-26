@@ -1,5 +1,5 @@
 project(
-  'wc-x11',
+  'wl-x11',
   'c',
   version: '0.1.0',
   default_options: [
@@ -20,7 +20,6 @@ wayland_server = dependency('wayland-server')
 xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 xcb = dependency('xcb')
-xcb_cursor = dependency('xcb-cursor')
 
 # wlroots' pkg-config file name is versioned (e.g. wlroots-0.18.pc,
 # wlroots-0.19.pc, ...) and the suffix changes with every wlroots major
@@ -41,8 +40,8 @@ message('using wlroots pkg-config name: ' + wlroots_name)
 wlroots = dependency(wlroots_name, required: true)
 
 executable(
-  'wc-x11',
+  'wl-x11',
   'src/main.c',
-  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_cursor],
+  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb],
   install: true,
 )
