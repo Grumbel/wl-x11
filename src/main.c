@@ -211,7 +211,12 @@ struct wlx_server {
 	xcb_atom_t atom_net_wm_state_maximized_vert;
 	xcb_atom_t atom_net_wm_state_maximized_horz;
 	xcb_atom_t atom_net_wm_state_fullscreen;
+	xcb_atom_t atom_net_wm_state_modal;
 	xcb_atom_t atom_wm_change_state;
+	xcb_atom_t atom_wm_transient_for;
+	xcb_atom_t atom_net_wm_window_type;
+	xcb_atom_t atom_net_wm_window_type_normal;
+	xcb_atom_t atom_net_wm_window_type_dialog;
 	xcb_atom_t atom_clipboard;
 	xcb_atom_t atom_primary;
 	xcb_atom_t atom_targets;
@@ -315,6 +320,7 @@ static bool pointer_coords_on_window(struct wlx_server *server,
 static struct wlx_window *window_from_xwin(struct wlx_server *server,
 		xcb_window_t w);
 static void set_active_window(struct wlx_server *server, struct wlx_window *win);
+static void apply_transient_hints(struct wlx_window *win);
 
 struct wlx_window {
 	struct wlx_server *server;
@@ -1022,6 +1028,7 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				}
 				dnd_set_xdnd_aware(server, win->xwin);
 				dnd_set_xdnd_aware(server, win->content_xwin);
+				apply_transient_hints(win);
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
 			/* Learn the WM's systematic position discrepancy from real
@@ -1186,20 +1193,21 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 #define WLX_DEFAULT_HEIGHT 720
 #define WLX_MIN_OUTPUT_SIZE 32
 
-/* Preferred buffer/window size for a toplevel. Prefer the surface buffer
- * size (exact pixels the client attached) over xdg geometry, which can be
- * a few pixels larger than the visible widget area for some toolkits. */
+/* Preferred size: xdg window geometry first (excludes client-side shadow /
+ * transparent padding that would otherwise show as black without RGBA
+ * compositing), then surface buffer size, then the compositor default. */
 static void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	int w = 0, h = 0;
 	if (win->toplevel && win->toplevel->base) {
-		struct wlr_surface *surf = win->toplevel->base->surface;
-		if (surf && surf->current.width > 0 && surf->current.height > 0) {
-			w = surf->current.width;
-			h = surf->current.height;
-		} else {
-			struct wlr_box geo = win->toplevel->base->current.geometry;
-			w = geo.width;
-			h = geo.height;
+		struct wlr_box geo = win->toplevel->base->current.geometry;
+		w = geo.width;
+		h = geo.height;
+		if (w <= 0 || h <= 0) {
+			struct wlr_surface *surf = win->toplevel->base->surface;
+			if (surf) {
+				w = surf->current.width;
+				h = surf->current.height;
+			}
 		}
 	}
 	if (w < WLX_MIN_OUTPUT_SIZE) {
@@ -1210,6 +1218,116 @@ static void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_o
 	}
 	*w_out = w;
 	*h_out = h;
+}
+
+static void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w,
+		xcb_window_t parent) {
+	if (!s->xcb || w == XCB_WINDOW_NONE || parent == XCB_WINDOW_NONE ||
+			s->atom_wm_transient_for == XCB_ATOM_NONE) {
+		return;
+	}
+	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
+		s->atom_wm_transient_for, XCB_ATOM_WINDOW, 32, 1, &parent);
+	xcb_flush(s->xcb);
+}
+
+static void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w,
+		bool dialog) {
+	if (!s->xcb || w == XCB_WINDOW_NONE ||
+			s->atom_net_wm_window_type == XCB_ATOM_NONE) {
+		return;
+	}
+	xcb_atom_t type = dialog
+		? s->atom_net_wm_window_type_dialog
+		: s->atom_net_wm_window_type_normal;
+	if (type == XCB_ATOM_NONE) {
+		return;
+	}
+	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
+		s->atom_net_wm_window_type, XCB_ATOM_ATOM, 32, 1, &type);
+	xcb_flush(s->xcb);
+}
+
+static void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal) {
+	if (!s->xcb || w == XCB_WINDOW_NONE ||
+			s->atom_net_wm_state_modal == XCB_ATOM_NONE) {
+		return;
+	}
+	if (modal) {
+		xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
+			s->atom_net_wm_state, XCB_ATOM_ATOM, 32, 1,
+			&s->atom_net_wm_state_modal);
+	}
+	xcb_flush(s->xcb);
+}
+
+/* Apply ICCCM/EWMH transient + dialog hints so the host WM places this
+ * window above its parent instead of cascading it elsewhere on the desktop. */
+static void apply_transient_hints(struct wlx_window *win) {
+	struct wlx_server *server = win->server;
+	if (!win->toplevel || win->xwin == XCB_WINDOW_NONE) {
+		return;
+	}
+
+	struct wlr_xdg_toplevel *parent_tl = win->toplevel->parent;
+	struct wlx_window *parent_win = NULL;
+	if (parent_tl && parent_tl->base) {
+		parent_win = parent_tl->base->data;
+	}
+
+	bool is_transient = parent_win != NULL;
+	xcb_window_t parent_x = XCB_WINDOW_NONE;
+	if (parent_win) {
+		parent_x = parent_win->content_xwin != XCB_WINDOW_NONE
+			? parent_win->content_xwin : parent_win->xwin;
+	}
+
+	/* ICCCM: WM_TRANSIENT_FOR on the client window (and frame for WMs
+	 * that read it from the frame). */
+	if (is_transient && parent_x != XCB_WINDOW_NONE) {
+		xwin_set_transient_for(server, win->xwin, parent_x);
+		if (win->content_xwin != XCB_WINDOW_NONE &&
+				win->content_xwin != win->xwin) {
+			xwin_set_transient_for(server, win->content_xwin, parent_x);
+		}
+		xwin_set_window_type_dialog(server, win->xwin, true);
+		xwin_set_window_type_dialog(server, win->content_xwin, true);
+		/* Treat transients as modal for the host WM (wlroots 0.20 has no
+		 * xdg_toplevel.modal on the state struct yet). */
+		xwin_set_modal(server, win->xwin, true);
+		xwin_set_modal(server, win->content_xwin, true);
+		wlr_log(WLR_INFO, "transient hints: 0x%x transient for 0x%x",
+			win->xwin, parent_x);
+
+		/* Best-effort placement: center on parent if we know both
+		 * positions. The WM may override; without this, some WMs still
+		 * park new windows at a cascade origin when hints arrive late. */
+		int16_t px = 0, py = 0;
+		int pw = 0, ph = 0;
+		int cw = win->output ? win->output->width : 0;
+		int ch = win->output ? win->output->height : 0;
+		if (cw > 0 && ch > 0 &&
+				query_window_root_position(server, parent_win->xwin, &px, &py) &&
+				query_window_geometry(server, parent_win->xwin, &pw, &ph)) {
+			int nx = (int)px + (pw - cw) / 2;
+			int ny = (int)py + (ph - ch) / 2;
+			if (nx < 0) {
+				nx = 0;
+			}
+			if (ny < 0) {
+				ny = 0;
+			}
+			xcb_window_t cfg = win->content_xwin != XCB_WINDOW_NONE
+				? win->content_xwin : win->xwin;
+			uint32_t values[2] = { (uint32_t)nx, (uint32_t)ny };
+			xcb_configure_window(server->xcb, cfg,
+				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
+			xcb_flush(server->xcb);
+		}
+	} else {
+		xwin_set_window_type_dialog(server, win->xwin, false);
+		xwin_set_window_type_dialog(server, win->content_xwin, false);
+	}
 }
 
 /* Which of our toplevels is under the host pointer, by real X11 window
@@ -1465,6 +1583,7 @@ static void create_output_for_window(struct wlx_window *win) {
 		xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
 		dnd_set_xdnd_aware(server, win->xwin);
 		dnd_set_xdnd_aware(server, win->content_xwin);
+		apply_transient_hints(win);
 		snprintf(win->last_title, sizeof(win->last_title), "%s",
 			win->toplevel->title ? win->toplevel->title : "");
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s",
@@ -1534,14 +1653,15 @@ static void surface_commit(struct wl_listener *listener, void *data) {
 	/* Fit the X11 window to the client's geometry until the WM/user
 	 * resizes it. Fixes transient dialogs that first mapped with a
 	 * default size and only later committed their real size. */
-	if (win->output && !win->size_from_wm && win->toplevel &&
-			win->toplevel->base && win->toplevel->base->surface) {
-		struct wlr_surface *surf = win->toplevel->base->surface;
-		int cw = surf->current.width;
-		int ch = surf->current.height;
+	if (win->output && !win->size_from_wm && win->toplevel) {
+		struct wlr_box geo = win->toplevel->base->current.geometry;
+		/* Prefer xdg geometry (opaque window area). Buffer size can include
+		 * transparent CSD shadow drawn as black without host alpha. */
+		int cw = geo.width;
+		int ch = geo.height;
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
 				(cw != win->output->width || ch != win->output->height)) {
-			wlr_log(WLR_INFO, "fitting X11 window to surface buffer %dx%d",
+			wlr_log(WLR_INFO, "fitting X11 window to client geometry %dx%d",
 				cw, ch);
 			resize_output_to(win, cw, ch);
 			wlr_xdg_toplevel_set_size(win->toplevel,
@@ -3423,7 +3543,16 @@ int main(int argc, char **argv) {
 			intern_atom(server.xcb, "_NET_WM_STATE_MAXIMIZED_HORZ");
 		server.atom_net_wm_state_fullscreen =
 			intern_atom(server.xcb, "_NET_WM_STATE_FULLSCREEN");
+		server.atom_net_wm_state_modal =
+			intern_atom(server.xcb, "_NET_WM_STATE_MODAL");
 		server.atom_wm_change_state = intern_atom(server.xcb, "WM_CHANGE_STATE");
+		server.atom_wm_transient_for = intern_atom(server.xcb, "WM_TRANSIENT_FOR");
+		server.atom_net_wm_window_type =
+			intern_atom(server.xcb, "_NET_WM_WINDOW_TYPE");
+		server.atom_net_wm_window_type_normal =
+			intern_atom(server.xcb, "_NET_WM_WINDOW_TYPE_NORMAL");
+		server.atom_net_wm_window_type_dialog =
+			intern_atom(server.xcb, "_NET_WM_WINDOW_TYPE_DIALOG");
 
 		wlr_log(WLR_INFO,
 			"resolved atoms: _NET_WM_NAME=%u UTF8_STRING=%u "
