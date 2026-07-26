@@ -25,30 +25,42 @@ pixman = dependency('pixman-1')
 xcb = dependency('xcb')
 xcb_xfixes = dependency('xcb-xfixes')
 
-# Prefer an already-built wlroots from pkg-config (Nix package or
-# `ninja -C subprojects/wlroots/build install`). Fall back to the in-tree
-# subproject for plain meson builds that have not installed it.
-pkgconfig_bin = find_program('pkg-config')
-wlroots_name = 'wlroots'
-list_result = run_command(pkgconfig_bin, '--list-all', check: false)
-if list_result.returncode() == 0
-  foreach line : list_result.stdout().strip().split('\n')
-    fields = line.strip().split(' ')
-    if fields.length() > 0 and fields[0].startswith('wlroots')
-      wlroots_name = fields[0]
-    endif
-  endforeach
-endif
+# -------------------------------------------------------------------
+# wlroots: patched tree under subprojects/wlroots (MODE before MapWindow,
+# size-only WM_NORMAL_HINTS, wlr_x11_output_get_window, etc.).
+#
+# Prefer the subproject when present. If it is absent (Nix builds wlroots
+# as packages.wlroots and strips subprojects/ from the compositor src),
+# fall back to pkg-config — which must be the same patched build.
+# Force pkg-config with -Duse_system_wlroots=true (meson_options.txt).
+# -------------------------------------------------------------------
+fs = import('fs')
+use_system = get_option('use_system_wlroots')
+have_vendor = fs.is_dir('subprojects/wlroots')
 
-wlroots = dependency(wlroots_name, required: false)
-if wlroots.found()
-  message('using installed wlroots: ' + wlroots_name)
-else
-  fs = import('fs')
-  if not fs.is_dir('subprojects/wlroots')
-    error('wlroots not found via pkg-config and subprojects/wlroots is missing')
+if use_system or not have_vendor
+  if use_system and have_vendor
+    warning('use_system_wlroots=true: ignoring vendored subprojects/wlroots')
   endif
-  message('using vendored subprojects/wlroots')
+  if not have_vendor and not use_system
+    message('subprojects/wlroots not present; using pkg-config wlroots '
+      + '(expected for Nix builds that supply a patched package)')
+  endif
+  pkgconfig_bin = find_program('pkg-config')
+  wlroots_name = 'wlroots'
+  list_result = run_command(pkgconfig_bin, '--list-all', check: false)
+  if list_result.returncode() == 0
+    foreach line : list_result.stdout().strip().split('\n')
+      fields = line.strip().split(' ')
+      if fields.length() > 0 and fields[0].startswith('wlroots')
+        wlroots_name = fields[0]
+      endif
+    endforeach
+  endif
+  wlroots = dependency(wlroots_name, required: true)
+  message('using pkg-config wlroots: ' + wlroots_name)
+else
+  message('using vendored subprojects/wlroots (required for patches)')
   wlroots_proj = subproject(
     'wlroots',
     default_options: [

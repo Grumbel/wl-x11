@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Ingo Ruhnke <grumbel@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# By default wl-x11 builds the patched tree under subprojects/wlroots.
+# System wlroots lacks MODE-before-map, size-only WM_NORMAL_HINTS, and
+# wlr_x11_output_get_window() — enabling this will almost certainly break
+# placement and property syncing unless those patches are reapplied.
+option(
+  'use_system_wlroots',
+  type: 'boolean',
+  value: false,
+  description: 'Link against pkg-config wlroots instead of the vendored patched subproject (not recommended)',
+)

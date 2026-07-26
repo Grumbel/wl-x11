@@ -57,14 +57,6 @@ useful steps:
 - Optional: skip the backend's own `WM_NORMAL_HINTS` when the compositor is
   about to set them, or document that the compositor owns hints.
 
-### Build and packaging
-
-- Document that the vendored subproject is **required** (patched), not
-  optional, so a plain `pkg-config wlroots` does not silently drop MODE-before-
-  map and size-hint fixes.
-- Consider a compile flag (e.g. `wlr_x11_rootless`) around the window-id
-  export and commit order so upstreaming later is cleaner.
-
 ## Explicitly out of scope (for now)
 
 - Layer-shell (not meaningful without a real desktop surface)

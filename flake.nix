@@ -90,6 +90,12 @@
 
           buildInputs = wlrootsBuildInputs ++ [ wlroots ];
 
+          # Source is filtered without subprojects/; meson falls back to the
+          # patched packages.wlroots via pkg-config (see meson.build).
+          mesonFlags = [
+            "-Duse_system_wlroots=true"
+          ];
+
           meta = with lib; {
             description = "Minimal wlroots-based Wayland compositor nested in X11, one X11 window per Wayland toplevel";
             homepage = "https://example.invalid/wl-x11";
@@ -138,7 +144,10 @@
             echo "wl-x11 dev shell."
             echo "  packages.wlroots = patched X11-only wlroots (cached separately)"
             echo "  packages.wl-x11   = compositor only"
-            echo "Build compositor: meson setup build && ninja -C build"
+            echo "Build compositor against the Nix wlroots package:"
+            echo "  meson setup build -Duse_system_wlroots=true && ninja -C build"
+            echo "Or use the in-tree subproject (no flag) if present:"
+            echo "  meson setup build && ninja -C build"
             echo "Rebuild wlroots:  nix build .#wlroots"
           '';
         };

@@ -17,7 +17,9 @@ is tracked in [TODO.md](TODO.md) — read that before starting larger changes.
 
 ## Vendored wlroots
 
-`subprojects/wlroots` is **required and patched**. Important local changes:
+`subprojects/wlroots` is **required and patched**. Meson builds it by
+default; `-Duse_system_wlroots=true` is an explicit escape hatch only.
+Important local changes:
 
 - `WM_NORMAL_HINTS` / `WM_SIZE_HINTS` atoms and size-only hints at create
 - Create window at (0,0) with no position flags (host WM places)
@@ -29,7 +31,8 @@ is tracked in [TODO.md](TODO.md) — read that before starting larger changes.
 
 Do not replace the subproject with an unpatched system wlroots without
 re-applying those fixes. Prefer extending the vendored tree when a change
-belongs in the X11 backend.
+belongs in the X11 backend. When upstreaming, these are the candidates for
+a `wlr_x11_rootless`-style feature flag.
 
 ## Placement rules (do not regress)
 

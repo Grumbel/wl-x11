@@ -31,6 +31,16 @@ that's entirely up to the host window manager.
 
 ## Building
 
+**Patched wlroots is required.** This project ships a patched tree under
+`subprojects/wlroots` (MODE before MapWindow, size-only `WM_NORMAL_HINTS`,
+`wlr_x11_output_get_window()`, and related rootless fixes). A plain distro
+wlroots will **not** include those changes.
+
+Meson **prefers the vendored subproject when present**. If it is absent
+(Nix builds the same tree as `packages.wlroots` and strips `subprojects/`
+from the compositor source), meson falls back to pkg-config, which must
+then be that patched package.
+
 ### With Nix
 
 ```sh
@@ -42,19 +52,32 @@ or, for a dev shell:
 
 ```sh
 nix develop
+# Use the flake's patched wlroots package (subproject is not in the shell src):
+meson setup build -Duse_system_wlroots=true
+ninja -C build
+```
+
+The flake builds `subprojects/wlroots` as a separate derivation
+(`packages.wlroots`) so compositor-only edits do not rebuild wlroots.
+
+### Without Nix
+
+You need: `meson`, `ninja`, `pkg-config`, `wayland-server`,
+`wayland-protocols`, `libxkbcommon`, `pixman`, `libxcb`, `xcb-xfixes`,
+plus the usual X11/GL deps wlroots wants for the X11 backend (see
+`flake.nix` / the subproject’s meson files).
+
+```sh
+# Uses subprojects/wlroots automatically
 meson setup build
 ninja -C build
 ```
 
-### Without Nix
-
-You need: `meson`, `ninja`, `pkg-config`, `wlroots` (0.18 or 0.19 dev
-headers), `wayland-server`, `wayland-protocols`, `libxkbcommon`, `pixman`,
-`libxcb`, `xcb-xfixes`.
+To force a system wlroots (not recommended unless you reapplied the
+patches):
 
 ```sh
-meson setup build
-ninja -C build
+meson setup build -Duse_system_wlroots=true
 ```
 
 ## Running
@@ -118,12 +141,12 @@ one-window-per-toplevel model. Notable things it does **not** do:
 
 ## API version note
 
-This targets **wlroots 0.18.x** headers (also tries 0.19 in
-`meson.build`). If your distro ships a different major version, a handful
-of calls (`wlr_output_event_commit::state`, `wlr_scene_surface_try_from_buffer`,
-the `wlr_seat_pointer_notify_axis` argument list, etc.) may have slightly
-different names/signatures — check the corresponding `wlr/...h` header and
-adjust `src/main.c` accordingly; the overall architecture does not change.
+The vendored tree is **wlroots 0.21.x-dev** (see
+`subprojects/wlroots/meson.build`). The compositor is written against that
+API. If you use `-Duse_system_wlroots=true` with another major version,
+expect signature drift (`wlr_output` commit events, scene helpers, seat
+axis notify, etc.) and missing local APIs such as
+`wlr_x11_output_get_window()`.
 
 ## License
 
