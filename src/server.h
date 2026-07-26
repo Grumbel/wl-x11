@@ -309,6 +309,7 @@ struct wlx_window {
 	struct wl_listener request_maximize;
 	struct wl_listener request_fullscreen;
 	struct wl_listener request_minimize;
+	struct wl_listener new_popup;
 
 	struct wl_listener output_frame;
 	struct wl_listener output_destroy;
@@ -316,6 +317,25 @@ struct wlx_window {
 	struct wl_listener output_request_state;
 
 	struct wl_list link;
+};
+
+/* xdg_popup as an override-redirect X11 window (not clipped by parent). */
+struct wlx_popup {
+	struct wlx_server *server;
+	struct wlx_window *parent;
+	struct wlr_xdg_popup *xdg_popup;
+	struct wlr_scene_tree *scene_tree;
+	struct wlr_output *output;
+	struct wlr_output_layout_output *l_output;
+	struct wlr_scene_output *scene_output;
+
+	struct wl_listener map;
+	struct wl_listener unmap;
+	struct wl_listener destroy;
+	struct wl_listener commit;
+	struct wl_listener output_frame;
+	struct wl_listener output_destroy;
+	struct wl_listener new_popup; /* nested popups */
 };
 
 struct wlx_keyboard {

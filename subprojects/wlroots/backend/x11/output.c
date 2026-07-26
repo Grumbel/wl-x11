@@ -589,7 +589,8 @@ static const struct wlr_output_impl output_impl = {
 	.get_primary_formats = output_get_primary_formats,
 };
 
-struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
+static struct wlr_output *x11_output_create(struct wlr_backend *backend,
+		bool override_redirect) {
 	struct wlr_x11_backend *x11 = get_x11_backend_from_backend(backend);
 
 	if (!x11->started) {
@@ -638,27 +639,31 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	 * unset pixels transparent on ARGB visuals (host compositor blends).
 	 * NorthWest bit gravity keeps old pixels on resize so the window does
 	 * not flash empty between Configure and the next Present of a
-	 * matching-size buffer. Backing store helps when the X server supports it. */
+	 * matching-size buffer. Backing store helps when the X server supports it.
+	 * Override-redirect: used for xdg_popup (menus) so the host WM does not
+	 * reparent/decorate and we can place in root coordinates freely. */
 	uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL |
 		XCB_CW_BIT_GRAVITY | XCB_CW_WIN_GRAVITY | XCB_CW_BACKING_STORE |
 		XCB_CW_EVENT_MASK | XCB_CW_COLORMAP | XCB_CW_CURSOR;
-	uint32_t values[] = {
-		0, /* back_pixel: fully transparent on depth 32 */
-		0, /* border_pixel */
-		XCB_GRAVITY_NORTH_WEST,
-		XCB_GRAVITY_NORTH_WEST,
-		XCB_BACKING_STORE_WHEN_MAPPED,
-		XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY,
-		x11->colormap,
-		x11->transparent_cursor,
-	};
+	uint32_t values[10];
+	size_t n = 0;
+	values[n++] = 0; /* back_pixel */
+	values[n++] = 0; /* border_pixel */
+	values[n++] = XCB_GRAVITY_NORTH_WEST;
+	values[n++] = XCB_GRAVITY_NORTH_WEST;
+	values[n++] = XCB_BACKING_STORE_WHEN_MAPPED;
+	if (override_redirect) {
+		mask |= XCB_CW_OVERRIDE_REDIRECT;
+		/* OVERRIDE_REDIRECT comes before EVENT_MASK in the attribute order */
+		/* Rebuild: insert OR after BACKING_STORE */
+		values[n++] = 1;
+	}
+	values[n++] = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	values[n++] = x11->colormap;
+	values[n++] = x11->transparent_cursor;
 	output->win = xcb_generate_id(x11->xcb);
-	/* Create at (0,0). Position is intentionally unspecified: we set
-	 * WM_NORMAL_HINTS with only PSize (no USPosition/PPosition) so the
-	 * host WM is free to place the window — typically on the monitor that
-	 * contains the pointer. Setting PPosition or ConfigureWindow(x,y)
-	 * forces global-coordinate placement and often lands on the wrong
-	 * head in multi-monitor setups. */
+	/* Managed windows: create at (0,0), no position hints — host WM places.
+	 * Override-redirect: compositor will ConfigureWindow(x,y) before map. */
 	xcb_create_window(x11->xcb, x11->depth->depth, output->win,
 		x11->screen->root, 0, 0, wlr_output->width, wlr_output->height, 0,
 		XCB_WINDOW_CLASS_INPUT_OUTPUT, x11->visualid, mask, values);
@@ -721,6 +726,15 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	wl_signal_emit_mutable(&x11->backend.events.new_input, &output->touch.base);
 
 	return wlr_output;
+}
+
+struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
+	return x11_output_create(backend, false);
+}
+
+struct wlr_output *wlr_x11_output_create_override_redirect(
+		struct wlr_backend *backend) {
+	return x11_output_create(backend, true);
 }
 
 void handle_x11_configure_notify(struct wlr_x11_output *output,

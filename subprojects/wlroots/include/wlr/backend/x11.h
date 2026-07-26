@@ -30,6 +30,14 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend);
 
 /**
+ * Like wlr_x11_output_create, but the window is override-redirect (no host WM
+ * decorations/reparenting). Used for xdg_popup menus so they can extend past
+ * the parent toplevel and be placed in root coordinates.
+ */
+struct wlr_output *wlr_x11_output_create_override_redirect(
+	struct wlr_backend *backend);
+
+/**
  * Check whether this backend is an X11 backend.
  */
 bool wlr_backend_is_x11(const struct wlr_backend *backend);
