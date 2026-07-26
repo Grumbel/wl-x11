@@ -29,6 +29,11 @@ void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, unmap);
+	/* Cancel any pending host-close recreate; the client is going away. */
+	if (win->recreate_output_idle) {
+		wl_event_source_remove(win->recreate_output_idle);
+		win->recreate_output_idle = NULL;
+	}
 	if (win->output) {
 		/* wlr_output_destroy() synchronously fires events.destroy,
 		 * which runs output_destroy() above and clears win->output. */
@@ -113,6 +118,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, destroy);
 
+	if (win->recreate_output_idle) {
+		wl_event_source_remove(win->recreate_output_idle);
+		win->recreate_output_idle = NULL;
+	}
 	if (win->output) {
 		wlr_output_destroy(win->output);
 	}

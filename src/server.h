@@ -280,6 +280,12 @@ struct wlx_window {
 	char last_app_id[256];
 	bool initial_configure_sent;
 	struct wlr_xdg_toplevel_decoration_v1 *pending_decoration;
+	/* When the host WM closes the X11 window, wlroots destroys the
+	 * output. If the client is still mapped (e.g. gedit showing a
+	 * "save changes?" dialog after xdg_toplevel.close), we schedule
+	 * an idle recreate so the window stays visible. Cancelled on
+	 * unmap/destroy. */
+	struct wl_event_source *recreate_output_idle;
 
 	struct wl_listener map;
 	struct wl_listener unmap;

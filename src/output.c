@@ -129,14 +129,47 @@ void output_commit(struct wl_listener *listener, void *data) {
 	}
 }
 
+static void recreate_output_idle(void *data) {
+	struct wlx_window *win = data;
+	win->recreate_output_idle = NULL;
+
+	if (!win->toplevel || !win->toplevel->base ||
+			!win->toplevel->base->surface) {
+		return;
+	}
+	/* Client agreed to close (or unmapped for another reason). */
+	if (!win->toplevel->base->surface->mapped) {
+		return;
+	}
+	if (win->output) {
+		return;
+	}
+
+	wlr_log(WLR_INFO,
+		"recreating X11 output after host window close "
+		"(surface still mapped — client refused close or is showing a dialog)");
+	create_output_for_window(win);
+	if (win->output) {
+		set_active_window(win->server, win);
+	}
+}
+
 void output_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_destroy);
 
 	/* This fires both when the host WM closes the X11 window (wlroots'
 	 * X11 backend treats that like unplugging a monitor) and when we
-	 * ourselves call wlr_output_destroy() below. Ask the client to close
-	 * gracefully either way. */
-	if (win->toplevel) {
+	 * ourselves call wlr_output_destroy() from unmap.
+	 *
+	 * Only ask the client to close when the surface is still mapped:
+	 * that is the host-WM path. On the unmap path the client already
+	 * tore the surface down; sending close again is wrong and the
+	 * surface is no longer mapped so we must not recreate the window. */
+	bool still_mapped = win->toplevel && win->toplevel->base &&
+		win->toplevel->base->surface &&
+		win->toplevel->base->surface->mapped;
+
+	if (still_mapped) {
 		wlr_xdg_toplevel_send_close(win->toplevel);
 	}
 
@@ -166,6 +199,20 @@ void output_destroy(struct wl_listener *listener, void *data) {
 		 * calling set_active_window here (it would touch toplevel state
 		 * while the surface may already be tearing down). */
 		win->server->focused_window = NULL;
+	}
+
+	/* Host WM closed the X11 window, but the client is still mapped
+	 * (typical: xdg_toplevel.close → "save changes?" dialog, surface
+	 * stays up). Recreate a fresh X11 window on the next idle so the
+	 * content remains visible, matching pure-Wayland / in-client close
+	 * behaviour where the window does not vanish. */
+	if (still_mapped) {
+		if (win->recreate_output_idle) {
+			wl_event_source_remove(win->recreate_output_idle);
+			win->recreate_output_idle = NULL;
+		}
+		win->recreate_output_idle = wl_event_loop_add_idle(
+			win->server->loop, recreate_output_idle, win);
 	}
 }
 
