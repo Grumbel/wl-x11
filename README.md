@@ -93,6 +93,10 @@ one-window-per-toplevel model. Notable things it does **not** do:
   relatives) is mirrored between this compositor's Wayland seat selection
   and the host X11 `CLIPBOARD` selection. Images and other MIME types are
   not bridged; large pastes that require X11 INCR transfers are ignored.
+- **Drag-and-drop.** Wayland↔Wayland DnD works via the seat. Bridging to
+  host X11 uses XDND for `text/plain` and `text/uri-list` only. Drops from
+  X11 onto a nested window are imported into the Wayland selection (paste)
+  rather than injected as a surface-local drop (no grab serial from X11).
 - **Cursor via the X11 backend output-cursor path.** Client
   `wl_pointer.set_cursor` surfaces are forwarded with
   `wlr_cursor_set_surface`; the X11 backend turns them into real X cursors
