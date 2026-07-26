@@ -600,6 +600,7 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 	output->x11 = x11;
 	wl_list_init(&output->buffers);
 	pixman_region32_init(&output->exposed);
+	wl_signal_init(&output->events.request_close);
 
 	struct wlr_output *wlr_output = &output->wlr_output;
 
@@ -801,4 +802,10 @@ void handle_x11_present_event(struct wlr_x11_backend *x11,
 	default:
 		wlr_log(WLR_DEBUG, "Unhandled Present event %"PRIu16, event->event_type);
 	}
+}
+
+void wlr_x11_output_add_request_close_listener(struct wlr_output *wlr_output,
+		struct wl_listener *listener) {
+	struct wlr_x11_output *output = get_x11_output_from_output(wlr_output);
+	wl_signal_add(&output->events.request_close, listener);
 }

@@ -129,52 +129,28 @@ void output_commit(struct wl_listener *listener, void *data) {
 	}
 }
 
-static void recreate_output_idle(void *data) {
-	struct wlx_window *win = data;
-	win->recreate_output_idle = NULL;
-
-	if (!win->toplevel || !win->toplevel->base ||
-			!win->toplevel->base->surface) {
-		return;
-	}
-	/* Client agreed to close (or unmapped for another reason). */
-	if (!win->toplevel->base->surface->mapped) {
-		return;
-	}
-	if (win->output) {
-		return;
-	}
-
-	wlr_log(WLR_INFO,
-		"recreating X11 output after host window close "
-		"(surface still mapped — client refused close or is showing a dialog)");
-	create_output_for_window(win);
-	if (win->output) {
-		set_active_window(win->server, win);
+/* Host WM sent WM_DELETE_WINDOW. Ask the client to close; keep the X11
+ * window (and wlr_output) until the client unmaps/destroys the surface. */
+static void output_request_close(struct wl_listener *listener, void *data) {
+	struct wlx_window *win = wl_container_of(listener, win, output_request_close);
+	(void)data;
+	if (win->toplevel) {
+		wlr_log(WLR_INFO, "X11 WM_DELETE_WINDOW → xdg_toplevel.close");
+		wlr_xdg_toplevel_send_close(win->toplevel);
 	}
 }
 
 void output_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_destroy);
+	(void)data;
 
-	/* This fires both when the host WM closes the X11 window (wlroots'
-	 * X11 backend treats that like unplugging a monitor) and when we
-	 * ourselves call wlr_output_destroy() from unmap.
-	 *
-	 * Only ask the client to close when the surface is still mapped:
-	 * that is the host-WM path. On the unmap path the client already
-	 * tore the surface down; sending close again is wrong and the
-	 * surface is no longer mapped so we must not recreate the window. */
-	bool still_mapped = win->toplevel && win->toplevel->base &&
-		win->toplevel->base->surface &&
-		win->toplevel->base->surface->mapped;
-
-	if (still_mapped) {
-		wlr_xdg_toplevel_send_close(win->toplevel);
-	}
+	/* Reached when the client closed the surface (unmap path) or the
+	 * backend is tearing down. Close requests from the host WM no longer
+	 * destroy the output — see output_request_close. */
 
 	wl_list_remove(&win->output_frame.link);
 	wl_list_remove(&win->output_destroy.link);
+	wl_list_remove(&win->output_request_close.link);
 	wl_list_remove(&win->output_commit.link);
 	wl_list_remove(&win->output_request_state.link);
 
@@ -201,19 +177,6 @@ void output_destroy(struct wl_listener *listener, void *data) {
 		win->server->focused_window = NULL;
 	}
 
-	/* Host WM closed the X11 window, but the client is still mapped
-	 * (typical: xdg_toplevel.close → "save changes?" dialog, surface
-	 * stays up). Recreate a fresh X11 window on the next idle so the
-	 * content remains visible, matching pure-Wayland / in-client close
-	 * behaviour where the window does not vanish. */
-	if (still_mapped) {
-		if (win->recreate_output_idle) {
-			wl_event_source_remove(win->recreate_output_idle);
-			win->recreate_output_idle = NULL;
-		}
-		win->recreate_output_idle = wl_event_loop_add_idle(
-			win->server->loop, recreate_output_idle, win);
-	}
 }
 
 /* Preferred size: xdg window geometry first (excludes client-side shadow /
@@ -616,6 +579,9 @@ void create_output_for_window(struct wlx_window *win) {
 	wl_signal_add(&output->events.frame, &win->output_frame);
 	win->output_destroy.notify = output_destroy;
 	wl_signal_add(&output->events.destroy, &win->output_destroy);
+
+	win->output_request_close.notify = output_request_close;
+	wlr_x11_output_add_request_close_listener(output, &win->output_request_close);
 	win->output_commit.notify = output_commit;
 	wl_signal_add(&output->events.commit, &win->output_commit);
 	win->output_request_state.notify = output_request_state;

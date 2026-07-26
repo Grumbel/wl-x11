@@ -52,6 +52,12 @@ struct wlr_x11_output {
 		struct wlr_swapchain *swapchain;
 		xcb_render_picture_t pic;
 	} cursor;
+
+	/* Host WM sent WM_DELETE_WINDOW. Compositor should request the client
+	 * to close; the X11 window stays until the output is destroyed. */
+	struct {
+		struct wl_signal request_close; // struct wlr_output *
+	} events;
 };
 
 struct wlr_x11_touchpoint {

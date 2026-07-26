@@ -285,7 +285,7 @@ struct wlx_window {
 	 * "save changes?" dialog after xdg_toplevel.close), we schedule
 	 * an idle recreate so the window stays visible. Cancelled on
 	 * unmap/destroy. */
-	struct wl_event_source *recreate_output_idle;
+	struct wl_listener output_request_close;
 
 	struct wl_listener map;
 	struct wl_listener unmap;

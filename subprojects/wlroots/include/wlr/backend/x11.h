@@ -48,4 +48,17 @@ bool wlr_output_is_x11(const struct wlr_output *output);
  */
 void wlr_x11_output_set_title(struct wlr_output *output, const char *title);
 
+/**
+ * Listen for a host-WM close request (WM_DELETE_WINDOW) on an X11 output.
+ *
+ * Unlike the stock behaviour of destroying the output immediately, the X11
+ * backend keeps the window alive and emits this signal so the compositor can
+ * ask the client to close (e.g. via xdg_toplevel.close). Destroy the output
+ * only when the client has actually unmapped/destroyed the surface.
+ *
+ * data passed to the listener is the struct wlr_output *.
+ */
+void wlr_x11_output_add_request_close_listener(struct wlr_output *output,
+	struct wl_listener *listener);
+
 #endif

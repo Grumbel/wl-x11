@@ -91,7 +91,12 @@ static void handle_x11_event(struct wlr_x11_backend *x11,
 			struct wlr_x11_output *output =
 				get_x11_output_from_window_id(x11, ev->window);
 			if (output != NULL) {
-				wlr_output_destroy(&output->wlr_output);
+				/* Keep the X11 window alive (like a native X11 app) so the
+				 * client can show a save dialog. The compositor handles
+				 * request_close and destroys the output when the client
+				 * actually tears down the surface. */
+				wl_signal_emit_mutable(&output->events.request_close,
+					&output->wlr_output);
 			}
 		} else {
 			wlr_log(WLR_DEBUG, "Unhandled client message %"PRIu32,
