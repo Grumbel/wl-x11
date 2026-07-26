@@ -50,6 +50,8 @@
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/wait.h>
 
 #include <wayland-server-core.h>
 
@@ -89,6 +91,17 @@ struct wc_server {
 	struct wlr_backend *backend;
 	struct wlr_renderer *renderer;
 	struct wlr_allocator *allocator;
+
+	/* For `wc-x11 <command>`: track connected Wayland clients so we can
+	 * shut down once none remain, rather than just watching the spawned
+	 * process (which may fork/re-exec into a different process that
+	 * actually holds the Wayland connection). See client_created_notify()
+	 * and main(). */
+	struct wl_listener client_created;
+	int active_clients;
+	bool have_seen_client;
+	bool exit_when_clients_gone;
+	pid_t launched_pid;
 
 	struct wlr_scene *scene;
 	struct wlr_scene_output_layout *scene_layout;
@@ -476,6 +489,27 @@ static bool query_window_geometry(struct wc_server *s, xcb_window_t w,
 	return true;
 }
 
+/* xcb_get_geometry's x/y fields are defined as position relative to the
+ * window's immediate parent -- exactly what `xwininfo` shows as "Relative
+ * upper-left X/Y". For win->content_xwin, whose parent is win->xwin (the
+ * WM's decoration frame), this directly gives the border+titlebar inset:
+ * no need to infer it by learning from ConfigureNotify feedback. */
+static bool query_window_relative_offset(struct wc_server *s, xcb_window_t w,
+		int16_t *x, int16_t *y) {
+	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
+		return false;
+	}
+	xcb_get_geometry_cookie_t cookie = xcb_get_geometry(s->xcb, w);
+	xcb_get_geometry_reply_t *reply = xcb_get_geometry_reply(s->xcb, cookie, NULL);
+	if (!reply) {
+		return false;
+	}
+	*x = reply->x;
+	*y = reply->y;
+	free(reply);
+	return true;
+}
+
 /* Real, ground-truth root-relative pointer position, queried directly
  * from the X server -- bypasses wlroots' own cursor tracking entirely
  * (no output-layout clamping, no per-device normalization, no risk of
@@ -510,11 +544,17 @@ static void begin_interactive_move(struct wc_window *win) {
 	server->move_offset_x = wx - px;
 	server->move_offset_y = wy - py;
 	server->drag_last_send_at = (struct timespec){0};
-	server->drag_correction_x = 0;
-	server->drag_correction_y = 0;
+
+	int16_t inset_x = 0, inset_y = 0;
+	query_window_relative_offset(server, win->content_xwin, &inset_x, &inset_y);
+	server->drag_correction_x = inset_x;
+	server->drag_correction_y = inset_y;
+
 	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
-		"0x%x at (%d,%d), pointer at (%d,%d), offset (%d,%d)",
-		win->xwin, wx, wy, px, py, server->move_offset_x, server->move_offset_y);
+		"0x%x at (%d,%d), pointer at (%d,%d), offset (%d,%d), "
+		"correction (%d,%d)", win->xwin, wx, wy, px, py,
+		server->move_offset_x, server->move_offset_y,
+		server->drag_correction_x, server->drag_correction_y);
 }
 
 static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
@@ -536,11 +576,16 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	server->resize_start_pointer_x = px;
 	server->resize_start_pointer_y = py;
 	server->drag_last_send_at = (struct timespec){0};
-	server->drag_correction_x = 0;
-	server->drag_correction_y = 0;
+
+	int16_t inset_x = 0, inset_y = 0;
+	query_window_relative_offset(server, win->content_xwin, &inset_x, &inset_y);
+	server->drag_correction_x = inset_x;
+	server->drag_correction_y = inset_y;
+
 	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
-		"0x%x (edges 0x%x) at (%d,%d) %dx%d, pointer at (%d,%d)",
-		win->xwin, edges, wx, wy, w, h, px, py);
+		"0x%x (edges 0x%x) at (%d,%d) %dx%d, pointer at (%d,%d), "
+		"correction (%d,%d)", win->xwin, edges, wx, wy, w, h, px, py,
+		server->drag_correction_x, server->drag_correction_y);
 }
 
 static void toplevel_request_move(struct wl_listener *listener, void *data) {
@@ -1587,20 +1632,86 @@ static int handle_terminate_signal(int signal_number, void *data) {
 	return 0;
 }
 
+static int handle_sigchld(int signal_number, void *data) {
+	(void)signal_number;
+	(void)data;
+	int status;
+	pid_t pid;
+	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+		wlr_log(WLR_INFO, "reaped child process %d", pid);
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------------- */
+/* `wc-x11 <command>`: launch a client alongside the compositor, and    */
+/* shut down once no Wayland clients remain connected                  */
+/* ------------------------------------------------------------------- */
+
+struct wc_client_track {
+	struct wc_server *server;
+	struct wl_listener destroy;
+};
+
+static void client_destroy_notify(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct wc_client_track *track = wl_container_of(listener, track, destroy);
+	struct wc_server *server = track->server;
+
+	server->active_clients--;
+	wlr_log(WLR_INFO, "wayland client disconnected (%d remaining)",
+		server->active_clients);
+
+	if (server->exit_when_clients_gone && server->have_seen_client &&
+			server->active_clients <= 0) {
+		wlr_log(WLR_INFO,
+			"no more wayland clients connected, shutting down");
+		wl_display_terminate(server->wl_display);
+	}
+
+	wl_list_remove(&track->destroy.link);
+	free(track);
+}
+
+static void client_created_notify(struct wl_listener *listener, void *data) {
+	struct wc_server *server = wl_container_of(listener, server, client_created);
+	struct wl_client *client = data;
+
+	server->active_clients++;
+	server->have_seen_client = true;
+	wlr_log(WLR_INFO, "wayland client connected (%d active)",
+		server->active_clients);
+
+	struct wc_client_track *track = calloc(1, sizeof(*track));
+	track->server = server;
+	track->destroy.notify = client_destroy_notify;
+	wl_client_add_destroy_listener(client, &track->destroy);
+}
+
 /* ------------------------------------------------------------------- */
 /* main                                                                  */
 /* ------------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
 	bool debug = false;
+	char **command_argv = NULL;
 	for (int i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--debug") == 0) {
 			debug = true;
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			printf("usage: wc-x11 [--debug]\n"
-				"  --debug   print verbose diagnostic logging "
-				"(default: only errors)\n");
+			printf("usage: wc-x11 [--debug] [command [args...]]\n"
+				"  --debug             print verbose diagnostic logging "
+				"(default: only errors)\n"
+				"  command [args...]   also launch this program with "
+				"WAYLAND_DISPLAY set,\n"
+				"                      and shut down once no Wayland "
+				"clients remain connected\n");
 			return 0;
+		} else {
+			/* First non-flag argument: everything from here on is the
+			 * command to launch, not further wc-x11 flags. */
+			command_argv = &argv[i];
+			break;
 		}
 	}
 
@@ -1739,20 +1850,59 @@ int main(int argc, char **argv) {
 
 	setenv("WAYLAND_DISPLAY", socket, true);
 
+	server.client_created.notify = client_created_notify;
+	wl_display_add_client_created_listener(server.wl_display, &server.client_created);
+
 	g_display_for_signal = server.wl_display;
 	server.sigint_source = wl_event_loop_add_signal(loop, SIGINT,
 		handle_terminate_signal, server.wl_display);
 	server.sigterm_source = wl_event_loop_add_signal(loop, SIGTERM,
 		handle_terminate_signal, server.wl_display);
+	wl_event_loop_add_signal(loop, SIGCHLD, handle_sigchld, NULL);
+
+	server.launched_pid = -1;
+	if (command_argv) {
+		server.exit_when_clients_gone = true;
+		pid_t pid = fork();
+		if (pid == 0) {
+			/* Child: WAYLAND_DISPLAY was set via setenv() above, so it's
+			 * already inherited through environ; just exec. */
+			execvp(command_argv[0], command_argv);
+			fprintf(stderr, "wc-x11: failed to exec '%s': %s\n",
+				command_argv[0], strerror(errno));
+			_exit(127);
+		} else if (pid < 0) {
+			fprintf(stderr, "wc-x11: fork() failed: %s\n", strerror(errno));
+			server.exit_when_clients_gone = false;
+		} else {
+			server.launched_pid = pid;
+			wlr_log(WLR_INFO, "launched '%s' (pid %d) with WAYLAND_DISPLAY=%s",
+				command_argv[0], pid, socket);
+		}
+	}
 
 	fprintf(stderr,
-		"wc-x11: running. WAYLAND_DISPLAY=%s (nested inside X11 DISPLAY=%s)\n"
-		"wc-x11: start clients with, e.g.:\n"
-		"wc-x11:   WAYLAND_DISPLAY=%s weston-terminal\n"
-		"wc-x11:   WAYLAND_DISPLAY=%s foot\n",
-		socket, x11_display, socket, socket);
+		"wc-x11: running. WAYLAND_DISPLAY=%s (nested inside X11 DISPLAY=%s)\n",
+		socket, x11_display);
+	if (command_argv) {
+		fprintf(stderr,
+			"wc-x11: launched '%s'; will exit once no Wayland clients "
+			"remain connected\n", command_argv[0]);
+	} else {
+		fprintf(stderr,
+			"wc-x11: start clients with, e.g.:\n"
+			"wc-x11:   WAYLAND_DISPLAY=%s weston-terminal\n"
+			"wc-x11:   WAYLAND_DISPLAY=%s foot\n",
+			socket, socket);
+	}
 
 	wl_display_run(server.wl_display);
+
+	if (server.launched_pid > 0) {
+		/* Best-effort: don't leave the launched app running (or its
+		 * children orphaned) after the compositor exits. */
+		kill(server.launched_pid, SIGTERM);
+	}
 
 	wl_display_destroy_clients(server.wl_display);
 	wlr_scene_node_destroy(&server.scene->tree.node);
