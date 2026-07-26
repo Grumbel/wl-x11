@@ -162,13 +162,29 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		}
 	}
 
-	if (surface) {
-		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-		wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
-	} else {
+	struct wlr_surface *prev = server->seat->pointer_state.focused_surface;
+	if (surface == prev) {
+		if (surface) {
+			wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
+		}
+		return;
+	}
+
+	if (!surface) {
+		/* Left all of our surfaces — default arrow on the last output. */
 		wlr_seat_pointer_clear_focus(server->seat);
 		reset_cursor_to_default(server);
+		return;
 	}
+
+	/* Crossing into a different surface (possibly another of our X
+	 * windows). Reset to left_ptr first so the previous client's cursor
+	 * does not stick on the new host window until set_cursor arrives. */
+	if (prev != NULL) {
+		reset_cursor_to_default(server);
+	}
+	wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+	wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
 }
 
 /* Client called wl_pointer.set_cursor. Honour it only when that client

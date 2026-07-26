@@ -501,31 +501,61 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 		uint8_t type = event->response_type & ~0x80;
 		if (type == XCB_FOCUS_IN) {
 			xcb_focus_in_event_t *fi = (xcb_focus_in_event_t *)event;
-			struct wlx_window *win = window_from_xwin(server, fi->event);
-			if (win) {
-				wlr_log(WLR_INFO, "X11 FocusIn on window 0x%x", fi->event);
-				set_active_window(server, win);
+			/* Ignore grab transitions and pointer-only notifies; keep
+			 * keyboard activation aligned with real host WM focus. */
+			if (fi->mode != XCB_NOTIFY_MODE_NORMAL &&
+					fi->mode != XCB_NOTIFY_MODE_WHILE_GRABBED) {
+				/* skip */
+			} else if (fi->detail == XCB_NOTIFY_DETAIL_POINTER ||
+					fi->detail == XCB_NOTIFY_DETAIL_POINTER_ROOT ||
+					fi->detail == XCB_NOTIFY_DETAIL_INFERIOR) {
+				/* skip: not a keyboard-focus gain on this window */
+			} else {
+				struct wlx_window *win = window_from_xwin(server, fi->event);
+				if (win) {
+					wlr_log(WLR_INFO, "X11 FocusIn on 0x%x (mode %u detail %u)",
+						fi->event, fi->mode, fi->detail);
+					set_active_window(server, win);
+					/* If the pointer is already over this window, re-enter
+					 * so the client can set_cursor for the focused surface. */
+					double sx = 0, sy = 0;
+					if (win->toplevel &&
+							pointer_coords_on_window(server, win, &sx, &sy)) {
+						wlx_pointer_to_surface(server, &sx, &sy);
+						reset_cursor_to_default(server);
+						wlr_seat_pointer_notify_enter(server->seat,
+							win->toplevel->base->surface, sx, sy);
+					}
+				}
 			}
 		} else if (type == XCB_FOCUS_OUT) {
 			xcb_focus_out_event_t *fo = (xcb_focus_out_event_t *)event;
 			/* detail == Inferior: focus moved to a child (still ours).
+			 * mode Grab/Ungrab: temporary; ignore.
 			 * Also do not clear when focus is merely moving between two
 			 * of our toplevels — the matching FocusIn will set the new
-			 * active window. Clearing here races with click-to-focus and
-			 * was making dialogs grey out while the parent reactivated. */
-			struct wlx_window *win = window_from_xwin(server, fo->event);
-			if (win && server->focused_window == win &&
-					fo->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
-				struct wlx_window *under = window_at_root_pointer(server);
-				if (under && under != win) {
-					wlr_log(WLR_INFO, "X11 FocusOut on 0x%x — focus moving to "
-						"another of our windows, not clearing", fo->event);
-				} else if (under == win) {
-					/* Spurious focus churn inside the same toplevel. */
-				} else {
-					wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x (detail %u)",
-						fo->event, fo->detail);
-					set_active_window(server, NULL);
+			 * active window. */
+			if (fo->mode != XCB_NOTIFY_MODE_NORMAL &&
+					fo->mode != XCB_NOTIFY_MODE_WHILE_GRABBED) {
+				/* skip grab churn */
+			} else if (fo->detail == XCB_NOTIFY_DETAIL_INFERIOR ||
+					fo->detail == XCB_NOTIFY_DETAIL_POINTER ||
+					fo->detail == XCB_NOTIFY_DETAIL_POINTER_ROOT) {
+				/* skip */
+			} else {
+				struct wlx_window *win = window_from_xwin(server, fo->event);
+				if (win && server->focused_window == win) {
+					struct wlx_window *under = window_at_root_pointer(server);
+					if (under && under != win) {
+						wlr_log(WLR_INFO, "X11 FocusOut on 0x%x — focus moving to "
+							"another of our windows, not clearing", fo->event);
+					} else if (under == win) {
+						/* Spurious focus churn inside the same toplevel. */
+					} else {
+						wlr_log(WLR_INFO, "X11 FocusOut on 0x%x (mode %u detail %u)",
+							fo->event, fo->mode, fo->detail);
+						set_active_window(server, NULL);
+					}
 				}
 			}
 		} else if (type == XCB_REPARENT_NOTIFY) {

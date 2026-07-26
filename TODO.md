@@ -29,15 +29,6 @@ OR windows are the preferred path for menus and dropdowns.
 
 ## Medium impact
 
-### Cursor and input polish
-
-- Per-window cursor is already via the X11 backend; ensure leave/enter when
-  the pointer crosses between two of *our* X windows does not briefly show
-  the wrong cursor or drop focus.
-- Keyboard focus: force-on-map is good for dialogs. Optionally respect host
-  `FocusIn` / `FocusOut` more strictly so alt-tab away and back matches pure
-  X apps.
-
 ### Clipboard / DnD scope
 
 Current bridge is text-only (`text/plain` on CLIPBOARD and PRIMARY). Next
