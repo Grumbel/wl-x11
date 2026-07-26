@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
 
-	server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display);
+	server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display, 1);
 	server.new_toplevel_decoration.notify = server_new_toplevel_decoration;
 	wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration,
 		&server.new_toplevel_decoration);

@@ -333,10 +333,12 @@ xcb_window_t find_content_window(struct wlx_server *server, struct wlx_window *w
 			"(largest descendant, area=%u) under frame 0x%x",
 			best, best_area, win->xwin);
 	} else {
-		wlr_log(WLR_ERROR, "could not identify a content window under "
-			"frame 0x%x; window-management requests (move/resize/"
-			"maximize/minimize) will fall back to targeting the frame "
-			"and likely be ignored by the WM", win->xwin);
+		/* Normal before the host WM reparents us into a decoration frame
+		 * (related[] only has the client window). Callers fall back to
+		 * xwin; ReparentNotify will re-run discovery once a frame exists. */
+		wlr_log(WLR_INFO, "no distinct content window under 0x%x yet "
+			"(likely not reparented); using client window itself",
+			win->xwin);
 	}
 	return best;
 }

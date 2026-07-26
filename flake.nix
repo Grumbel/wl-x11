@@ -12,6 +12,28 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
+        # Same set nixpkgs uses for pkgs.wlroots, minus libinput/seatd/vulkan/
+        # xwayland (disabled via mesonFlags). Attribute names match
+        # pkgs/development/libraries/wlroots/default.nix on nixos-unstable.
+        wlrootsBuildInputs = with pkgs; [
+          wayland
+          wayland-protocols
+          libxkbcommon
+          pixman
+          libdrm
+          libGL
+          libgbm
+          libx11
+          libxcb
+          # These may be named libxcb-* or xorg.xcbutil* depending on pin;
+          # try the names from current nixpkgs wlroots package first.
+          libxcb-wm
+          libxcb-render-util
+          libxcb-image
+          libxcb-errors
+          lcms2
+        ];
       in
       {
         packages.default = pkgs.stdenv.mkDerivation {
@@ -23,20 +45,19 @@
             meson
             ninja
             pkg-config
+            wayland-scanner
           ];
 
-          # nixpkgs' `wlroots` currently tracks the 0.18.x series, which is
-          # what this compositor is written against. If your nixpkgs pin
-          # ships a different wlroots major version, the wlr_output_state /
-          # wlr_scene_* calls in src/main.c may need small adjustments -- see
-          # README.md.
-          buildInputs = with pkgs; [
-            wlroots
-            wayland
-            wayland-protocols
-            libxkbcommon
-            pixman
-            libxcb
+          buildInputs = wlrootsBuildInputs;
+
+          mesonFlags = [
+            "-Dwlroots:backends=x11"
+            "-Dwlroots:session=disabled"
+            "-Dwlroots:examples=false"
+            "-Dwlroots:tests=false"
+            "-Dwlroots:xwayland=disabled"
+            "-Dwlroots:renderers=gles2"
+            "-Dwlroots:color-management=disabled"
           ];
 
           meta = with pkgs.lib; {
@@ -57,8 +78,6 @@
           nativeBuildInputs = [ pkgs.reuse ];
           src = ./.;
         } ''
-          # runCommand sandbox is read-only on $src; copy so reuse can
-          # walk the tree the same way a checkout would.
           cp -r "$src" ./src
           chmod -R u+w ./src
           cd ./src
@@ -71,22 +90,15 @@
             meson
             ninja
             pkg-config
+            wayland-scanner
             gdb
             reuse
           ];
-          buildInputs = with pkgs; [
-            wlroots
-            wayland
-            wayland-protocols
-            libxkbcommon
-            pixman
-            libxcb
-          ];
+          buildInputs = wlrootsBuildInputs;
 
           shellHook = ''
-            echo "wl-x11 dev shell. Build with: meson setup build && ninja -C build"
-            echo "Run with:   DISPLAY=:0 ./build/wl-x11"
-            echo "REUSE lint: reuse lint"
+            echo "wl-x11 dev shell (vendored subprojects/wlroots)."
+            echo "See flake.nix mesonFlags for suggested -Dwlroots:* options."
           '';
         };
       });
