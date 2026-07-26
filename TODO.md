@@ -29,15 +29,6 @@ OR windows are the preferred path for menus and dropdowns.
 
 ## Medium impact
 
-### Keep `WM_NORMAL_HINTS` in sync on resize
-
-Size-only hints are set at create/map. When the user or client resizes,
-update `PSize` / `PMinSize` again so the host WM's constraints stay correct.
-Honor `xdg_toplevel` min/max size the same way when present.
-
-Also keep `_NET_WM_WINDOW_TYPE` and `_NET_WM_STATE` (maximized, fullscreen)
-in sync both ways so the taskbar and WM match the Wayland side.
-
 ### Bidirectional maximize / fullscreen / close
 
 - Host `_NET_WM_STATE` changes → `wlr_xdg_toplevel_set_maximized` /

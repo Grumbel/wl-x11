@@ -127,6 +127,8 @@ void output_commit(struct wl_listener *listener, void *data) {
 		int lh = wlx_unscale_size(win->server, h);
 		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
 	}
+	/* Keep host WM constraints aligned with the new size / xdg min-max. */
+	win_sync_size_hints(win);
 }
 
 /* Host WM sent WM_DELETE_WINDOW. Ask the client to close; keep the X11
@@ -244,13 +246,12 @@ void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal) {
 	}
 }
 
-/* ICCCM WM_NORMAL_HINTS with size only — no USPosition/PPosition.
- * That is the signal for the host WM to run its own placement (usually
- * on the monitor that contains the pointer). Never ConfigureWindow(x,y)
- * for ordinary top-levels; that forces global coordinates and often
- * puts the window on the wrong head. */
+/* ICCCM WM_NORMAL_HINTS — size (+ optional min/max), no USPosition/PPosition.
+ * Omitting position flags is the signal for the host WM to place the window
+ * itself. Never ConfigureWindow(x,y) for ordinary top-levels. */
 void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
-		int width, int height) {
+		int width, int height, int min_width, int min_height,
+		int max_width, int max_height) {
 	if (!s->xcb || w == XCB_WINDOW_NONE ||
 			s->atom_wm_normal_hints == XCB_ATOM_NONE ||
 			s->atom_wm_size_hints == XCB_ATOM_NONE ||
@@ -259,14 +260,65 @@ void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
 	}
 	/* Layout matches xcb_size_hints_t / XSizeHints (18 × int32). */
 	int32_t hints[18] = {0};
-	/* PSize | PMinSize only (bits 3 and 4). */
+	/* PSize | PMinSize (bits 3 and 4). */
 	hints[0] = (1 << 3) | (1 << 4);
 	hints[3] = width;
 	hints[4] = height;
-	hints[5] = 1;
-	hints[6] = 1;
+	hints[5] = min_width > 0 ? min_width : 1;
+	hints[6] = min_height > 0 ? min_height : 1;
+	if (max_width > 0 && max_height > 0) {
+		hints[0] |= (1 << 5); /* PMaxSize */
+		hints[7] = max_width;
+		hints[8] = max_height;
+	}
 	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
 		s->atom_wm_normal_hints, s->atom_wm_size_hints, 32, 18, hints);
+}
+
+void win_sync_size_hints(struct wlx_window *win) {
+	if (!win || !win->server || win->xwin == XCB_WINDOW_NONE) {
+		return;
+	}
+	/* Prefer last_* when set (pre-map preferred size, or after a commit).
+	 * Fall back to the live output mode. */
+	int width = win->last_output_width > 0 ? win->last_output_width :
+		(win->output ? win->output->width : 0);
+	int height = win->last_output_height > 0 ? win->last_output_height :
+		(win->output ? win->output->height : 0);
+	if (width <= 0 || height <= 0) {
+		return;
+	}
+
+	int min_w = 1, min_h = 1, max_w = 0, max_h = 0;
+	if (win->toplevel) {
+		/* xdg sizes are logical; host window is scaled pixels. */
+		int32_t tmin_w = win->toplevel->current.min_width;
+		int32_t tmin_h = win->toplevel->current.min_height;
+		int32_t tmax_w = win->toplevel->current.max_width;
+		int32_t tmax_h = win->toplevel->current.max_height;
+		if (tmin_w > 0) {
+			min_w = wlx_scale_size(win->server, tmin_w);
+		}
+		if (tmin_h > 0) {
+			min_h = wlx_scale_size(win->server, tmin_h);
+		}
+		/* xdg: 0 means unconstrained. */
+		if (tmax_w > 0 && tmax_h > 0) {
+			max_w = wlx_scale_size(win->server, tmax_w);
+			max_h = wlx_scale_size(win->server, tmax_h);
+		}
+	}
+
+	xwin_set_size_hints(win->server, win->xwin,
+		width, height, min_w, min_h, max_w, max_h);
+	if (win->content_xwin != XCB_WINDOW_NONE &&
+			win->content_xwin != win->xwin) {
+		xwin_set_size_hints(win->server, win->content_xwin,
+			width, height, min_w, min_h, max_w, max_h);
+	}
+	if (win->server->xcb) {
+		xcb_flush(win->server->xcb);
+	}
 }
 
 /* Apply ICCCM/EWMH transient + dialog hints so the host WM places this
@@ -438,10 +490,11 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 		wlr_log(WLR_ERROR, "failed to resize X11 output to %dx%d", w, h);
 	}
 	wlr_output_state_finish(&state);
-	/* output_commit may have already updated last_* and set_size; keep
-	 * them consistent if commit did not emit (same-size no-op path). */
+	/* output_commit may have already updated last_*, set_size, and
+	 * WM_NORMAL_HINTS; keep last_* consistent if commit did not emit. */
 	win->last_output_width = win->output->width;
 	win->last_output_height = win->output->height;
+	win_sync_size_hints(win);
 }
 
 void create_output_for_window(struct wlx_window *win) {
@@ -494,11 +547,11 @@ void create_output_for_window(struct wlx_window *win) {
 		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
-		/* Size-only normal hints before MapWindow. Do not set position
-		 * and do not ConfigureWindow(x,y): the host WM places us. */
-		xwin_set_size_hints(server, win->xwin,
-			want_w > 0 ? want_w : output->width,
-			want_h > 0 ? want_h : output->height);
+		/* Size hints before MapWindow (no position flags). last_* not set
+		 * yet — pass preferred size via a temporary so win_sync works. */
+		win->last_output_width = want_w > 0 ? want_w : output->width;
+		win->last_output_height = want_h > 0 ? want_h : output->height;
+		win_sync_size_hints(win);
 		dnd_set_xdnd_aware(server, win->xwin);
 		if (server->xcb) {
 			xcb_flush(server->xcb);
@@ -511,9 +564,7 @@ void create_output_for_window(struct wlx_window *win) {
 			apply_transient_hints(win);
 			xwin_set_title(server, win->content_xwin, win->toplevel->title);
 			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
-			xwin_set_size_hints(server, win->content_xwin,
-				want_w > 0 ? want_w : output->width,
-				want_h > 0 ? want_h : output->height);
+			win_sync_size_hints(win);
 			dnd_set_xdnd_aware(server, win->content_xwin);
 			if (server->xcb) {
 				xcb_flush(server->xcb);

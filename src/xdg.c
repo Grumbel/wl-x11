@@ -93,6 +93,11 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	/* Re-apply pixel scale after the scene helper refreshed buffer dest sizes. */
 	wlx_apply_content_scale(win);
 
+	/* xdg min/max may have changed on this commit — keep host hints current. */
+	if (win->xwin != XCB_WINDOW_NONE && win->output) {
+		win_sync_size_hints(win);
+	}
+
 	if (win->xwin == XCB_WINDOW_NONE || !win->toplevel) {
 		return;
 	}

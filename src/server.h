@@ -344,7 +344,10 @@ void apply_transient_hints(struct wlx_window *win);
 void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w, xcb_window_t parent);
 void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w, bool dialog);
 void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal);
-void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w, int width, int height);
+void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
+	int width, int height, int min_width, int min_height,
+	int max_width, int max_height);
+void win_sync_size_hints(struct wlx_window *win);
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out);
 
 /* move_resize.c */
