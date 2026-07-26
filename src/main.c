@@ -309,6 +309,12 @@ static void dnd_handle_client_message(struct wlx_server *server,
 static void dnd_out_update_position(struct wlx_server *server);
 static void dnd_out_on_button_release(struct wlx_server *server);
 static void dnd_set_xdnd_aware(struct wlx_server *server, xcb_window_t w);
+static struct wlx_window *window_at_root_pointer(struct wlx_server *server);
+static bool pointer_coords_on_window(struct wlx_server *server,
+		struct wlx_window *win, double *sx, double *sy);
+static struct wlx_window *window_from_xwin(struct wlx_server *server,
+		xcb_window_t w);
+static void set_active_window(struct wlx_server *server, struct wlx_window *win);
 
 struct wlx_window {
 	struct wlx_server *server;
@@ -320,6 +326,10 @@ struct wlx_window {
 	struct wlr_scene_output *scene_output;
 	int last_output_width;
 	int last_output_height;
+	/* Once the host WM (or interactive resize) changes the X11 window
+	 * size we stop auto-fitting the output to the client's geometry, so
+	 * a user-enlarged window is not yanked back down on the next commit. */
+	bool size_from_wm;
 
 	xcb_window_t xwin;
 #define WLX_MAX_RELATED_WINDOWS 32
@@ -905,6 +915,9 @@ static void output_request_state(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_INFO, "output requested state (backend-detected resize) "
 		"-> accepting");
+	/* Host WM or user resized the X11 window — stop auto-fitting to
+	 * client geometry on subsequent commits. */
+	win->size_from_wm = true;
 	/* output_commit() (below) fires synchronously as part of this call
 	 * and handles diffing the new size against what we last told the
 	 * toplevel and forwarding it if different -- nothing further needed
@@ -956,16 +969,25 @@ static int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			}
 		} else if (type == XCB_FOCUS_OUT) {
 			xcb_focus_out_event_t *fo = (xcb_focus_out_event_t *)event;
-			/* Match the same way as FocusIn: focus may land on the
-			 * content window or a decoration child, not only the frame.
-			 * detail == Inferior means focus moved to a child of this
-			 * window (still inside our toplevel subtree) — do not clear. */
+			/* detail == Inferior: focus moved to a child (still ours).
+			 * Also do not clear when focus is merely moving between two
+			 * of our toplevels — the matching FocusIn will set the new
+			 * active window. Clearing here races with click-to-focus and
+			 * was making dialogs grey out while the parent reactivated. */
 			struct wlx_window *win = window_from_xwin(server, fo->event);
 			if (win && server->focused_window == win &&
 					fo->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
-				wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x (detail %u)",
-					fo->event, fo->detail);
-				set_active_window(server, NULL);
+				struct wlx_window *under = window_at_root_pointer(server);
+				if (under && under != win) {
+					wlr_log(WLR_INFO, "X11 FocusOut on 0x%x — focus moving to "
+						"another of our windows, not clearing", fo->event);
+				} else if (under == win) {
+					/* Spurious focus churn inside the same toplevel. */
+				} else {
+					wlr_log(WLR_INFO, "X11 FocusOut on window 0x%x (detail %u)",
+						fo->event, fo->detail);
+					set_active_window(server, NULL);
+				}
 			}
 		} else if (type == XCB_REPARENT_NOTIFY) {
 			/* WM reparented our window into a decoration frame (or the
@@ -1162,6 +1184,137 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 
 #define WLX_DEFAULT_WIDTH 1024
 #define WLX_DEFAULT_HEIGHT 720
+#define WLX_MIN_OUTPUT_SIZE 32
+
+/* Preferred buffer/window size for a toplevel. Prefer the surface buffer
+ * size (exact pixels the client attached) over xdg geometry, which can be
+ * a few pixels larger than the visible widget area for some toolkits. */
+static void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
+	int w = 0, h = 0;
+	if (win->toplevel && win->toplevel->base) {
+		struct wlr_surface *surf = win->toplevel->base->surface;
+		if (surf && surf->current.width > 0 && surf->current.height > 0) {
+			w = surf->current.width;
+			h = surf->current.height;
+		} else {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			w = geo.width;
+			h = geo.height;
+		}
+	}
+	if (w < WLX_MIN_OUTPUT_SIZE) {
+		w = WLX_DEFAULT_WIDTH;
+	}
+	if (h < WLX_MIN_OUTPUT_SIZE) {
+		h = WLX_DEFAULT_HEIGHT;
+	}
+	*w_out = w;
+	*h_out = h;
+}
+
+/* Which of our toplevels is under the host pointer, by real X11 window
+ * identity — not the scene-graph cursor position. The layout cursor can
+ * lag or stay on the parent output when the pointer moves to a sibling
+ * X11 window (dialog), which previously made click-to-focus activate the
+ * parent and grey out the dialog. */
+static struct wlx_window *window_at_root_pointer(struct wlx_server *server) {
+	if (!server->xcb || xcb_connection_has_error(server->xcb)) {
+		return NULL;
+	}
+	xcb_query_pointer_cookie_t cookie =
+		xcb_query_pointer(server->xcb, server->xcb_root);
+	xcb_query_pointer_reply_t *reply =
+		xcb_query_pointer_reply(server->xcb, cookie, NULL);
+	if (!reply) {
+		return NULL;
+	}
+	xcb_window_t w = reply->child;
+	free(reply);
+	if (w == XCB_WINDOW_NONE) {
+		return NULL;
+	}
+	/* Descend to the deepest child under the pointer, then walk back up
+	 * until we recognise one of our frame/content/related windows. */
+	for (int depth = 0; depth < 16; depth++) {
+		int16_t px = 0, py = 0;
+		if (!query_root_pointer_position(server, &px, &py)) {
+			break;
+		}
+		xcb_translate_coordinates_cookie_t tc =
+			xcb_translate_coordinates(server->xcb, server->xcb_root, w, px, py);
+		xcb_translate_coordinates_reply_t *tr =
+			xcb_translate_coordinates_reply(server->xcb, tc, NULL);
+		if (!tr || tr->child == XCB_WINDOW_NONE) {
+			free(tr);
+			break;
+		}
+		w = tr->child;
+		free(tr);
+	}
+	while (w != XCB_WINDOW_NONE && w != server->xcb_root) {
+		struct wlx_window *win = window_from_xwin(server, w);
+		if (win) {
+			return win;
+		}
+		xcb_query_tree_cookie_t q = xcb_query_tree(server->xcb, w);
+		xcb_query_tree_reply_t *tr = xcb_query_tree_reply(server->xcb, q, NULL);
+		if (!tr) {
+			break;
+		}
+		w = tr->parent;
+		free(tr);
+	}
+	return NULL;
+}
+
+/* Pointer coordinates relative to the toplevel surface, from the real
+ * X11 pointer position (not the possibly-stale layout cursor). */
+static bool pointer_coords_on_window(struct wlx_server *server,
+		struct wlx_window *win, double *sx, double *sy) {
+	if (!win || !win->toplevel) {
+		return false;
+	}
+	xcb_window_t target = win->content_xwin != XCB_WINDOW_NONE
+		? win->content_xwin : win->xwin;
+	if (target == XCB_WINDOW_NONE || !server->xcb) {
+		return false;
+	}
+	int16_t px = 0, py = 0;
+	if (!query_root_pointer_position(server, &px, &py)) {
+		return false;
+	}
+	xcb_translate_coordinates_cookie_t tc =
+		xcb_translate_coordinates(server->xcb, server->xcb_root, target, px, py);
+	xcb_translate_coordinates_reply_t *tr =
+		xcb_translate_coordinates_reply(server->xcb, tc, NULL);
+	if (!tr) {
+		return false;
+	}
+	*sx = (double)tr->dst_x;
+	*sy = (double)tr->dst_y;
+	free(tr);
+	return true;
+}
+
+static void resize_output_to(struct wlx_window *win, int w, int h) {
+	if (!win->output || w < WLX_MIN_OUTPUT_SIZE || h < WLX_MIN_OUTPUT_SIZE) {
+		return;
+	}
+	if (win->output->width == w && win->output->height == h) {
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_custom_mode(&state, w, h, 0);
+	if (!wlr_output_commit_state(win->output, &state)) {
+		wlr_log(WLR_ERROR, "failed to resize X11 output to %dx%d", w, h);
+	}
+	wlr_output_state_finish(&state);
+	/* output_commit may have already updated last_* and set_size; keep
+	 * them consistent if commit did not emit (same-size no-op path). */
+	win->last_output_width = win->output->width;
+	win->last_output_height = win->output->height;
+}
 
 static void create_output_for_window(struct wlx_window *win) {
 	struct wlx_server *server = win->server;
@@ -1176,6 +1329,7 @@ static void create_output_for_window(struct wlx_window *win) {
 	win->content_xwin = XCB_WINDOW_NONE;
 	win->related_count = 0;
 	memset(win->related, 0, sizeof(win->related));
+	win->size_from_wm = false;
 
 	xcb_window_t *before = NULL;
 	int before_n = 0;
@@ -1196,23 +1350,20 @@ static void create_output_for_window(struct wlx_window *win) {
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, true);
 
-	/* wlr_x11_output_create() does NOT pre-populate output->modes the way
-	 * DRM/KMS backends do -- X11 windows are arbitrarily resizable, so
-	 * there is no fixed mode list. If we don't explicitly set a mode
-	 * here, the output (and therefore the underlying X11 window) can end
-	 * up committed at its zero-initialized 0x0 size, which is why no
-	 * window would appear on screen. Always fall back to an explicit
-	 * custom mode when there's nothing in the preferred-mode list. */
+	/* Size the X11 window to the client's geometry when available so
+	 * transient dialogs are not forced into the desktop default size. */
+	int want_w = 0, want_h = 0;
+	toplevel_preferred_size(win, &want_w, &want_h);
+
 	struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
-	if (mode) {
+	if (mode && want_w == WLX_DEFAULT_WIDTH && want_h == WLX_DEFAULT_HEIGHT) {
 		wlr_log(WLR_INFO, "using preferred output mode %dx%d",
 			mode->width, mode->height);
 		wlr_output_state_set_mode(&state, mode);
 	} else {
-		wlr_log(WLR_INFO, "no preferred mode reported; using custom mode %dx%d",
-			WLX_DEFAULT_WIDTH, WLX_DEFAULT_HEIGHT);
-		wlr_output_state_set_custom_mode(&state, WLX_DEFAULT_WIDTH,
-			WLX_DEFAULT_HEIGHT, 0);
+		wlr_log(WLR_INFO, "using custom mode %dx%d (client geometry)",
+			want_w, want_h);
+		wlr_output_state_set_custom_mode(&state, want_w, want_h, 0);
 	}
 
 	if (!wlr_output_commit_state(output, &state)) {
@@ -1249,9 +1400,9 @@ static void create_output_for_window(struct wlx_window *win) {
 	win->output_request_state.notify = output_request_state;
 	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
-	int w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
-	int h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
-	wlr_xdg_toplevel_set_size(win->toplevel, w, h);
+	/* Confirm the size we committed; if we matched client geometry this
+	 * is a no-op for the client, otherwise it learns the default. */
+	wlr_xdg_toplevel_set_size(win->toplevel, output->width, output->height);
 
 	/* Best-effort: find the xcb_window_t the backend just created so we
 	 * can set WM_NAME / WM_CLASS on it. Prefer a newly appeared root
@@ -1264,8 +1415,8 @@ static void create_output_for_window(struct wlx_window *win) {
 
 	win->xwin = XCB_WINDOW_NONE;
 	xcb_window_t fallback = XCB_WINDOW_NONE;
-	int want_w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
-	int want_h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
+	want_w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
+	want_h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
 	for (int i = 0; i < after_n; i++) {
 		bool seen = false;
 		for (int j = 0; j < before_n; j++) {
@@ -1335,6 +1486,12 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		return; /* already has a window (e.g. re-map) */
 	}
 	create_output_for_window(win);
+	/* Dialogs and new windows should take keyboard focus immediately;
+	 * host FocusIn often arrives a frame later (or not at all if the WM
+	 * keeps focus on the parent). */
+	if (win->output) {
+		set_active_window(win->server, win);
+	}
 }
 
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
@@ -1372,6 +1529,28 @@ static void surface_commit(struct wl_listener *listener, void *data) {
 		win->pending_decoration = NULL;
 		wlr_xdg_toplevel_decoration_v1_set_mode(decoration,
 			WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	}
+
+	/* Fit the X11 window to the client's geometry until the WM/user
+	 * resizes it. Fixes transient dialogs that first mapped with a
+	 * default size and only later committed their real size. */
+	if (win->output && !win->size_from_wm && win->toplevel &&
+			win->toplevel->base && win->toplevel->base->surface) {
+		struct wlr_surface *surf = win->toplevel->base->surface;
+		int cw = surf->current.width;
+		int ch = surf->current.height;
+		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
+				(cw != win->output->width || ch != win->output->height)) {
+			wlr_log(WLR_INFO, "fitting X11 window to surface buffer %dx%d",
+				cw, ch);
+			resize_output_to(win, cw, ch);
+			wlr_xdg_toplevel_set_size(win->toplevel,
+				win->output->width, win->output->height);
+			if (win->l_output) {
+				wlr_scene_node_set_position(&win->scene_tree->node,
+					win->l_output->x, win->l_output->y);
+			}
+		}
 	}
 
 	if (win->xwin == XCB_WINDOW_NONE || !win->toplevel) {
@@ -1679,13 +1858,22 @@ static void process_cursor_motion(struct wlx_server *server, uint32_t time_msec)
 
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = surface_at_cursor(server, &sx, &sy);
+
+	/* When the layout cursor is still on the parent output but the real
+	 * X11 pointer is over a dialog, prefer the window under the pointer. */
+	if (!surface) {
+		struct wlx_window *under = window_at_root_pointer(server);
+		if (under && under->toplevel &&
+				pointer_coords_on_window(server, under, &sx, &sy)) {
+			surface = under->toplevel->base->surface;
+		}
+	}
+
 	if (surface) {
 		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
 		wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
 	} else {
 		wlr_seat_pointer_clear_focus(server->seat);
-		/* No client surface under the pointer — show the theme default.
-		 * Clients set their own cursor via request_set_cursor while focused. */
 		reset_cursor_to_default(server);
 	}
 }
@@ -1740,6 +1928,31 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
 
+	if ((uint32_t)event->state == (uint32_t)WLR_BUTTON_PRESSED) {
+		/* Prefer the real X11 window under the pointer. Scene hit-testing
+		 * alone activates the parent when the layout cursor has not yet
+		 * moved onto the dialog's output slot. */
+		struct wlx_window *win = window_at_root_pointer(server);
+		double sx = 0, sy = 0;
+		struct wlr_surface *surface = NULL;
+
+		if (win && win->toplevel &&
+				pointer_coords_on_window(server, win, &sx, &sy)) {
+			surface = win->toplevel->base->surface;
+			set_active_window(server, win);
+			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+		} else {
+			surface = surface_at_cursor(server, &sx, &sy);
+			if (surface) {
+				struct wlx_window *from_scene = window_from_surface(surface);
+				if (from_scene) {
+					set_active_window(server, from_scene);
+				}
+				wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+			}
+		}
+	}
+
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 		event->button, event->state);
 
@@ -1753,23 +1966,6 @@ static void server_cursor_button(struct wl_listener *listener, void *data) {
 			server->resize_win = NULL;
 		}
 		dnd_out_on_button_release(server);
-		return;
-	}
-
-	double sx, sy;
-	struct wlr_surface *surface = surface_at_cursor(server, &sx, &sy);
-	if (!surface) {
-		return;
-	}
-
-	/* Click-to-focus. In practice a click inside a window will usually
-	 * also cause the host WM to give it real X11 focus, generating a
-	 * FocusIn we'd handle anyway; this is a same-path fallback for that,
-	 * routed through set_active_window() so it can't drift out of sync
-	 * with the ACTIVATED/keyboard-focus state that drives. */
-	struct wlx_window *win = window_from_surface(surface);
-	if (win) {
-		set_active_window(server, win);
 	}
 }
 
