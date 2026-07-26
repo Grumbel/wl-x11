@@ -532,61 +532,66 @@ static bool query_root_pointer_position(struct wc_server *s, int16_t *x, int16_t
 
 #define WC_DRAG_THROTTLE_MS 16
 
-/* Window we actually xcb_configure during interactive move/resize.
- * Must be the real client window (content_xwin), not the WM frame:
- * ICCCM requires clients to configure their own window; the WM then
- * moves/resizes the frame. Configuring the frame is undefined and
- * breaks on many WMs. Falls back to xwin when content is unknown. */
+/* ICCCM ConfigureRequest target: the real client window, not the WM
+ * frame. The WM intercepts the request and moves/resizes the frame.
+ * Falls back to xwin when content is unknown. */
 static xcb_window_t configure_target_window(struct wc_window *win) {
 	return ewmh_target_window(win);
 }
 
+/* Visual outer top-left: the decoration frame when the WM has reparented
+ * us, otherwise the client window itself. ConfigureRequest x/y are the
+ * desired root position of this outer corner (ICCCM §4.1.5), so we must
+ * measure the frame — not the content origin below the titlebar — or the
+ * window jumps by exactly the titlebar/border inset on the first update. */
+static xcb_window_t outer_position_window(struct wc_window *win) {
+	if (win->xwin != XCB_WINDOW_NONE) {
+		return win->xwin;
+	}
+	return win->content_xwin;
+}
+
 static void begin_interactive_move(struct wc_window *win) {
 	struct wc_server *server = win->server;
+	xcb_window_t outer = outer_position_window(win);
 	xcb_window_t target = configure_target_window(win);
 	int16_t wx, wy, px, py;
-	if (target == XCB_WINDOW_NONE ||
-			!query_window_root_position(server, target, &wx, &wy) ||
+	if (outer == XCB_WINDOW_NONE || target == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, outer, &wx, &wy) ||
 			!query_root_pointer_position(server, &px, &py)) {
 		return;
 	}
 	server->move_win = win;
+	/* Offset from pointer to the frame's root origin — the same space as
+	 * ConfigureRequest x/y, so the first update is a no-op geometrically. */
 	server->move_offset_x = wx - px;
 	server->move_offset_y = wy - py;
 	server->drag_last_send_at = (struct timespec){0};
-
-	/* When target is the content window parented under a frame, root
-	 * position already reflects the final on-screen origin of the
-	 * client area; no extra inset correction is needed. Only apply
-	 * relative-offset correction when we are still configuring the
-	 * frame itself (content unknown). */
 	server->drag_correction_x = 0;
 	server->drag_correction_y = 0;
-	if (target == win->xwin && win->content_xwin != XCB_WINDOW_NONE &&
-			win->content_xwin != win->xwin) {
-		int16_t inset_x = 0, inset_y = 0;
-		if (query_window_relative_offset(server, win->content_xwin,
-				&inset_x, &inset_y)) {
-			server->drag_correction_x = inset_x;
-			server->drag_correction_y = inset_y;
-		}
-	}
+	server->drag_last_requested_x = wx;
+	server->drag_last_requested_y = wy;
 
 	wlr_log(WLR_INFO, "starting self-driven interactive move of window "
-		"0x%x (configure target 0x%x) at (%d,%d), pointer at (%d,%d), "
-		"offset (%d,%d), correction (%d,%d)", win->xwin, target, wx, wy,
-		px, py, server->move_offset_x, server->move_offset_y,
-		server->drag_correction_x, server->drag_correction_y);
+		"0x%x (outer 0x%x, configure target 0x%x) at (%d,%d), pointer at "
+		"(%d,%d), offset (%d,%d)", win->xwin, outer, target, wx, wy, px, py,
+		server->move_offset_x, server->move_offset_y);
 }
 
 static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	struct wc_server *server = win->server;
+	xcb_window_t outer = outer_position_window(win);
 	xcb_window_t target = configure_target_window(win);
+	/* Size must be the client (content) size: ConfigureRequest width/
+	 * height are the client's dimensions, not the frame's. */
+	xcb_window_t size_win = (win->content_xwin != XCB_WINDOW_NONE)
+		? win->content_xwin : win->xwin;
 	int16_t wx, wy, px, py;
 	int w, h;
-	if (target == XCB_WINDOW_NONE ||
-			!query_window_root_position(server, target, &wx, &wy) ||
-			!query_window_geometry(server, target, &w, &h) ||
+	if (outer == XCB_WINDOW_NONE || target == XCB_WINDOW_NONE ||
+			size_win == XCB_WINDOW_NONE ||
+			!query_window_root_position(server, outer, &wx, &wy) ||
+			!query_window_geometry(server, size_win, &w, &h) ||
 			!query_root_pointer_position(server, &px, &py)) {
 		return;
 	}
@@ -599,24 +604,15 @@ static void begin_interactive_resize(struct wc_window *win, uint32_t edges) {
 	server->resize_start_pointer_x = px;
 	server->resize_start_pointer_y = py;
 	server->drag_last_send_at = (struct timespec){0};
-
 	server->drag_correction_x = 0;
 	server->drag_correction_y = 0;
-	if (target == win->xwin && win->content_xwin != XCB_WINDOW_NONE &&
-			win->content_xwin != win->xwin) {
-		int16_t inset_x = 0, inset_y = 0;
-		if (query_window_relative_offset(server, win->content_xwin,
-				&inset_x, &inset_y)) {
-			server->drag_correction_x = inset_x;
-			server->drag_correction_y = inset_y;
-		}
-	}
+	server->drag_last_requested_x = wx;
+	server->drag_last_requested_y = wy;
 
 	wlr_log(WLR_INFO, "starting self-driven interactive resize of window "
-		"0x%x (configure target 0x%x, edges 0x%x) at (%d,%d) %dx%d, "
-		"pointer at (%d,%d), correction (%d,%d)", win->xwin, target,
-		edges, wx, wy, w, h, px, py,
-		server->drag_correction_x, server->drag_correction_y);
+		"0x%x (outer 0x%x, configure target 0x%x, edges 0x%x) at (%d,%d) "
+		"%dx%d, pointer at (%d,%d)", win->xwin, outer, target, edges,
+		wx, wy, w, h, px, py);
 }
 
 static void toplevel_request_move(struct wl_listener *listener, void *data) {
@@ -1537,6 +1533,8 @@ static void update_interactive_drag(struct wc_server *server) {
 		if (target == XCB_WINDOW_NONE) {
 			return;
 		}
+		/* x/y are root coordinates of the outer (frame) origin — what
+		 * ICCCM ConfigureRequest asks the WM to apply. */
 		int x = px + server->move_offset_x - server->drag_correction_x;
 		int y = py + server->move_offset_y - server->drag_correction_y;
 		server->drag_last_requested_x = x;
@@ -1552,7 +1550,7 @@ static void update_interactive_drag(struct wc_server *server) {
 		return;
 	}
 
-	/* resize */
+	/* resize: position is outer/frame root coords; size is client size */
 	xcb_window_t target = configure_target_window(server->resize_win);
 	if (target == XCB_WINDOW_NONE) {
 		return;
@@ -2060,11 +2058,52 @@ int main(int argc, char **argv) {
 		kill(server.launched_pid, SIGTERM);
 	}
 
+	/* Tear down in the order wlroots expects: clients first (so
+	 * per-window listeners are removed via xdg_toplevel_destroy), then
+	 * our listeners on globals/backend/cursor/seat (those objects assert
+	 * empty listener lists on destroy), then scene/backend, then display. */
 	wl_display_destroy_clients(server.wl_display);
-	wlr_scene_node_destroy(&server.scene->tree.node);
-	if (server.xcb) {
-		xcb_disconnect(server.xcb);
+
+	wl_list_remove(&server.new_xdg_toplevel.link);
+	wl_list_remove(&server.new_toplevel_decoration.link);
+	wl_list_remove(&server.client_created.link);
+	wl_list_remove(&server.new_input.link);
+	wl_list_remove(&server.cursor_motion.link);
+	wl_list_remove(&server.cursor_motion_absolute.link);
+	wl_list_remove(&server.cursor_button.link);
+	wl_list_remove(&server.cursor_axis.link);
+	wl_list_remove(&server.cursor_frame.link);
+	wl_list_remove(&server.request_set_selection.link);
+
+	if (server.sigint_source) {
+		wl_event_source_remove(server.sigint_source);
+		server.sigint_source = NULL;
 	}
+	if (server.sigterm_source) {
+		wl_event_source_remove(server.sigterm_source);
+		server.sigterm_source = NULL;
+	}
+
+	wlr_scene_node_destroy(&server.scene->tree.node);
+	wlr_cursor_destroy(server.cursor);
+	server.cursor = NULL;
+
+	if (server.xcb) {
+		if (server.default_cursor != 0) {
+			xcb_free_cursor(server.xcb, server.default_cursor);
+			server.default_cursor = 0;
+		}
+		xcb_disconnect(server.xcb);
+		server.xcb = NULL;
+	}
+
+	wlr_allocator_destroy(server.allocator);
+	server.allocator = NULL;
+	wlr_renderer_destroy(server.renderer);
+	server.renderer = NULL;
+	wlr_backend_destroy(server.backend);
+	server.backend = NULL;
+
 	wl_display_destroy(server.wl_display);
 	return 0;
 }
