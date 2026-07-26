@@ -29,14 +29,6 @@ OR windows are the preferred path for menus and dropdowns.
 
 ## Medium impact
 
-### Bidirectional maximize / fullscreen / close
-
-- Host `_NET_WM_STATE` changes → `wlr_xdg_toplevel_set_maximized` /
-  `set_fullscreen`
-- Client requests → set/clear the corresponding EWMH atoms on the X window
-- Confirm `WM_DELETE_WINDOW` from the titlebar always tears down the Wayland
-  surface cleanly (output destroy on unmap is already in place)
-
 ### Cursor and input polish
 
 - Per-window cursor is already via the X11 backend; ensure leave/enter when

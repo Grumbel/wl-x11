@@ -229,7 +229,7 @@ xcb_window_t outer_position_window(struct wlx_window *win) {
 struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w) {
 	struct wlx_window *win;
 	wl_list_for_each(win, &server->windows, link) {
-		if (win->xwin == w) {
+		if (win->xwin == w || win->content_xwin == w) {
 			return win;
 		}
 		for (int i = 0; i < win->related_count; i++) {
@@ -241,19 +241,98 @@ struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w) {
 	return NULL;
 }
 
+/* Host WM changed _NET_WM_STATE (titlebar maximize/fullscreen, etc.).
+ * Mirror into xdg_toplevel so the client matches the host chrome. */
+static void win_handle_net_wm_state_notify(struct wlx_server *server,
+		struct wlx_window *win) {
+	if (!win || !win->toplevel || !server->xcb ||
+			server->atom_net_wm_state == XCB_ATOM_NONE) {
+		return;
+	}
+	if (!win->initial_configure_sent) {
+		return;
+	}
+
+	/* Prefer the client window; some WMs only set the property there.
+	 * Fall back to the frame if the client has no _NET_WM_STATE yet. */
+	xcb_window_t targets[2] = {
+		ewmh_target_window(win),
+		win->xwin,
+	};
+
+	bool maximized = false;
+	bool fullscreen = false;
+	bool got = false;
+	for (int t = 0; t < 2; t++) {
+		xcb_window_t target = targets[t];
+		if (target == XCB_WINDOW_NONE) {
+			continue;
+		}
+		if (t == 1 && targets[0] == targets[1]) {
+			break;
+		}
+		xcb_get_property_cookie_t cookie = xcb_get_property(server->xcb, 0,
+			target, server->atom_net_wm_state, XCB_ATOM_ATOM, 0, 64);
+		xcb_get_property_reply_t *reply =
+			xcb_get_property_reply(server->xcb, cookie, NULL);
+		if (!reply) {
+			continue;
+		}
+		if (reply->type == XCB_ATOM_ATOM && reply->format == 32) {
+			xcb_atom_t *atoms = xcb_get_property_value(reply);
+			int n = (int)reply->value_len;
+			bool vert = false, horz = false;
+			fullscreen = false;
+			for (int i = 0; i < n; i++) {
+				if (atoms[i] == server->atom_net_wm_state_maximized_vert) {
+					vert = true;
+				} else if (atoms[i] == server->atom_net_wm_state_maximized_horz) {
+					horz = true;
+				} else if (atoms[i] == server->atom_net_wm_state_fullscreen) {
+					fullscreen = true;
+				}
+			}
+			/* EWMH: fully maximized only when both vert and horz are set. */
+			maximized = vert && horz;
+			got = true;
+			free(reply);
+			break;
+		}
+		free(reply);
+	}
+	if (!got) {
+		return;
+	}
+
+	bool cur_max = win->toplevel->current.maximized ||
+		win->toplevel->pending.maximized;
+	bool cur_fs = win->toplevel->current.fullscreen ||
+		win->toplevel->pending.fullscreen;
+
+	if (maximized != cur_max) {
+		wlr_log(WLR_INFO, "host _NET_WM_STATE maximized=%d → xdg_toplevel",
+			maximized);
+		win->size_from_wm = true;
+		wlr_xdg_toplevel_set_maximized(win->toplevel, maximized);
+	}
+	if (fullscreen != cur_fs) {
+		wlr_log(WLR_INFO, "host _NET_WM_STATE fullscreen=%d → xdg_toplevel",
+			fullscreen);
+		win->size_from_wm = true;
+		wlr_xdg_toplevel_set_fullscreen(win->toplevel, fullscreen);
+	}
+}
+
 void select_window_events(struct wlx_server *server, xcb_window_t w) {
 	if (!server->xcb || xcb_connection_has_error(server->xcb) || w == XCB_WINDOW_NONE) {
 		return;
 	}
-	/* FOCUS_CHANGE is the normal case (resize is otherwise handled via
-	 * wlroots' own request_state signal, not by us watching
-	 * ConfigureNotify). STRUCTURE_NOTIFY is temporarily back too, purely
-	 * to observe (log only, no reaction) what xfwm4 actually does to a
-	 * window's real geometry during an interactive move/resize drag, to
-	 * get ground truth after three different drag-driving mechanisms
-	 * all produced the same jump/wall symptom -- see the
-	 * XCB_CONFIGURE_NOTIFY case in handle_xcb_readable(). */
-	uint32_t mask = XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+	/* FOCUS_CHANGE: host focus → Wayland activated.
+	 * STRUCTURE_NOTIFY: ReparentNotify / diagnostic ConfigureNotify.
+	 * PROPERTY_CHANGE: host _NET_WM_STATE (maximize/fullscreen) → xdg. */
+	uint32_t mask = XCB_EVENT_MASK_FOCUS_CHANGE |
+		XCB_EVENT_MASK_STRUCTURE_NOTIFY |
+		XCB_EVENT_MASK_PROPERTY_CHANGE;
 	xcb_change_window_attributes(server->xcb, w, XCB_CW_EVENT_MASK, &mask);
 	xcb_flush(server->xcb);
 }
@@ -294,17 +373,13 @@ void register_x11_window_subtree(struct wlx_window *win, xcb_window_t w) {
 	free(children);
 }
 
-/* win->xwin (found via our root-children diff) is xfwm4's own decoration
- * frame, not the window wlroots actually created and owns (the private
- * struct wlr_x11_output's `win` field, which the public API doesn't
- * expose). EWMH/ICCCM window-management messages (_NET_WM_STATE,
- * _NET_WM_MOVERESIZE, WM_CHANGE_STATE) must target that real client
- * window -- WMs track requests by the original client id, and have no
- * reason to handle messages addressed to their own frame, which isn't a
- * "client" in their bookkeeping at all. This heuristically identifies
- * that window among the registered subtree: it's overwhelmingly the
- * largest-area descendant, since decoration widgets (title bar strip,
- * borders, buttons) are comparatively tiny. */
+/* After the host WM reparents, win->xwin is often the decoration frame
+ * while content_xwin is the real client window from
+ * wlr_x11_output_get_window(). EWMH/ICCCM messages (_NET_WM_STATE,
+ * _NET_WM_MOVERESIZE, WM_CHANGE_STATE) must target the client window —
+ * WMs key requests by the original client id. Among the registered
+ * subtree, the content window is usually the largest-area descendant
+ * (decoration widgets are comparatively small). */
 xcb_window_t find_content_window(struct wlx_server *server, struct wlx_window *win) {
 	xcb_window_t best = XCB_WINDOW_NONE;
 	uint32_t best_area = 0;
@@ -541,6 +616,15 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 		} else if (type == XCB_SELECTION_CLEAR) {
 			clipboard_handle_selection_clear(server,
 				(xcb_selection_clear_event_t *)event);
+		} else if (type == XCB_PROPERTY_NOTIFY) {
+			xcb_property_notify_event_t *pn =
+				(xcb_property_notify_event_t *)event;
+			if (pn->atom == server->atom_net_wm_state) {
+				struct wlx_window *win = window_from_xwin(server, pn->window);
+				if (win) {
+					win_handle_net_wm_state_notify(server, win);
+				}
+			}
 		} else if (type == XCB_CLIENT_MESSAGE) {
 			dnd_handle_client_message(server,
 				(xcb_client_message_event_t *)event);
