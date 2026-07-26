@@ -179,6 +179,8 @@ struct wlx_server {
 	xcb_atom_t atom_net_wm_state_modal;
 	xcb_atom_t atom_wm_change_state;
 	xcb_atom_t atom_wm_transient_for;
+	xcb_atom_t atom_wm_normal_hints;
+	xcb_atom_t atom_wm_size_hints;
 	xcb_atom_t atom_net_wm_window_type;
 	xcb_atom_t atom_net_wm_window_type_normal;
 	xcb_atom_t atom_net_wm_window_type_dialog;
@@ -342,6 +344,7 @@ void apply_transient_hints(struct wlx_window *win);
 void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w, xcb_window_t parent);
 void xwin_set_window_type_dialog(struct wlx_server *s, xcb_window_t w, bool dialog);
 void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal);
+void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w, int width, int height);
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out);
 
 /* move_resize.c */

@@ -420,14 +420,18 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 	} atom[] = {
 		{ .name = "WM_PROTOCOLS", .atom = &x11->atoms.wm_protocols },
 		{ .name = "WM_DELETE_WINDOW", .atom = &x11->atoms.wm_delete_window },
+		{ .name = "WM_NORMAL_HINTS", .atom = &x11->atoms.wm_normal_hints },
+		{ .name = "WM_SIZE_HINTS", .atom = &x11->atoms.wm_size_hints },
 		{ .name = "_NET_WM_NAME", .atom = &x11->atoms.net_wm_name },
 		{ .name = "UTF8_STRING", .atom = &x11->atoms.utf8_string },
 		{ .name = "_VARIABLE_REFRESH", .atom = &x11->atoms.variable_refresh },
 	};
 
 	for (size_t i = 0; i < sizeof(atom) / sizeof(atom[0]); ++i) {
+		/* only_if_exists = false so ICCCM atoms like WM_NORMAL_HINTS are
+		 * created if no client has referenced them yet. */
 		atom[i].cookie = xcb_intern_atom(x11->xcb,
-			true, strlen(atom[i].name), atom[i].name);
+			false, strlen(atom[i].name), atom[i].name);
 	}
 
 	for (size_t i = 0; i < sizeof(atom) / sizeof(atom[0]); ++i) {

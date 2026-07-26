@@ -244,6 +244,31 @@ void xwin_set_modal(struct wlx_server *s, xcb_window_t w, bool modal) {
 	}
 }
 
+/* ICCCM WM_NORMAL_HINTS with size only — no USPosition/PPosition.
+ * That is the signal for the host WM to run its own placement (usually
+ * on the monitor that contains the pointer). Never ConfigureWindow(x,y)
+ * for ordinary top-levels; that forces global coordinates and often
+ * puts the window on the wrong head. */
+void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
+		int width, int height) {
+	if (!s->xcb || w == XCB_WINDOW_NONE ||
+			s->atom_wm_normal_hints == XCB_ATOM_NONE ||
+			s->atom_wm_size_hints == XCB_ATOM_NONE ||
+			width <= 0 || height <= 0) {
+		return;
+	}
+	/* Layout matches xcb_size_hints_t / XSizeHints (18 × int32). */
+	int32_t hints[18] = {0};
+	/* PSize | PMinSize only (bits 3 and 4). */
+	hints[0] = (1 << 3) | (1 << 4);
+	hints[3] = width;
+	hints[4] = height;
+	hints[5] = 1;
+	hints[6] = 1;
+	xcb_change_property(s->xcb, XCB_PROP_MODE_REPLACE, w,
+		s->atom_wm_normal_hints, s->atom_wm_size_hints, 32, 18, hints);
+}
+
 /* Apply ICCCM/EWMH transient + dialog hints so the host WM places this
  * window above its parent instead of cascading it elsewhere on the desktop. */
 void apply_transient_hints(struct wlx_window *win) {
@@ -449,45 +474,18 @@ void create_output_for_window(struct wlx_window *win) {
 
 	wlr_output_init_render(output, server->allocator, server->renderer);
 
-	struct wlr_output_state state;
-	wlr_output_state_init(&state);
-	wlr_output_state_set_enabled(&state, true);
-
-	/* Size the X11 window to the client's geometry when available so
-	 * transient dialogs are not forced into the desktop default size. */
+	/* Size + map happen later. First resolve the X window id while it is
+	 * still unmapped (created by wlr_x11_output_create) so we can put
+	 * class/title/type on it before MapWindow — otherwise many host WMs
+	 * leave the window at (0,0). */
 	int want_w = 0, want_h = 0;
 	toplevel_preferred_size(win, &want_w, &want_h);
-	/* Host window is logical geometry scaled by content_scale. */
 	{
 		int logical_w = want_w, logical_h = want_h;
 		want_w = wlx_scale_size(server, logical_w);
 		want_h = wlx_scale_size(server, logical_h);
 	}
 
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(output);
-	if (mode && want_w == WLX_DEFAULT_WIDTH && want_h == WLX_DEFAULT_HEIGHT) {
-		wlr_log(WLR_INFO, "using preferred output mode %dx%d",
-			mode->width, mode->height);
-		wlr_output_state_set_mode(&state, mode);
-	} else {
-		wlr_log(WLR_INFO, "using custom mode %dx%d (client geometry)",
-			want_w, want_h);
-		wlr_output_state_set_custom_mode(&state, want_w, want_h, 0);
-	}
-
-	if (!wlr_output_commit_state(output, &state)) {
-		wlr_log(WLR_ERROR, "failed to commit initial state for new X11 output");
-	}
-	wlr_output_state_finish(&state);
-
-	wlr_log(WLR_INFO, "new X11 output committed at %dx%d",
-		output->width, output->height);
-	win->last_output_width = output->width;
-	win->last_output_height = output->height;
-
-	/* Resolve X window ID and apply transient position/hints *before*
-	 * scheduling the first frame, so the window is not painted at 0,0
-	 * and then jumped. */
 	if (server->xcb) {
 		xcb_flush(server->xcb);
 	}
@@ -498,8 +496,7 @@ void create_output_for_window(struct wlx_window *win) {
 
 	win->xwin = XCB_WINDOW_NONE;
 	xcb_window_t fallback = XCB_WINDOW_NONE;
-	want_w = output->width > 0 ? output->width : WLX_DEFAULT_WIDTH;
-	want_h = output->height > 0 ? output->height : WLX_DEFAULT_HEIGHT;
+	/* Match on default backend size (1024x768) or any new root child. */
 	for (int i = 0; i < after_n; i++) {
 		bool seen = false;
 		for (int j = 0; j < before_n; j++) {
@@ -516,7 +513,7 @@ void create_output_for_window(struct wlx_window *win) {
 		}
 		int gw = 0, gh = 0;
 		if (query_window_geometry(server, after[i], &gw, &gh) &&
-				gw == want_w && gh == want_h) {
+				((gw == 1024 && gh == 768) || (gw == want_w && gh == want_h))) {
 			win->xwin = after[i];
 			break;
 		}
@@ -528,7 +525,7 @@ void create_output_for_window(struct wlx_window *win) {
 	free(after);
 
 	if (win->xwin != XCB_WINDOW_NONE) {
-		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x for new toplevel",
+		wlr_log(WLR_INFO, "resolved backing X11 window id 0x%x (unmapped)",
 			win->xwin);
 		win->content_xwin = win->xwin;
 		win->related_count = 0;
@@ -537,10 +534,14 @@ void create_output_for_window(struct wlx_window *win) {
 			win->related[win->related_count++] = win->xwin;
 		}
 
-		/* Hints + position before any frame (and before slow subtree walk). */
 		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
+		/* Size-only normal hints before MapWindow. Do not set position
+		 * and do not ConfigureWindow(x,y): the host WM places us. */
+		xwin_set_size_hints(server, win->xwin,
+			want_w > 0 ? want_w : output->width,
+			want_h > 0 ? want_h : output->height);
 		dnd_set_xdnd_aware(server, win->xwin);
 		if (server->xcb) {
 			xcb_flush(server->xcb);
@@ -553,6 +554,9 @@ void create_output_for_window(struct wlx_window *win) {
 			apply_transient_hints(win);
 			xwin_set_title(server, win->content_xwin, win->toplevel->title);
 			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
+			xwin_set_size_hints(server, win->content_xwin,
+				want_w > 0 ? want_w : output->width,
+				want_h > 0 ? want_h : output->height);
 			dnd_set_xdnd_aware(server, win->content_xwin);
 			if (server->xcb) {
 				xcb_flush(server->xcb);
@@ -567,6 +571,28 @@ void create_output_for_window(struct wlx_window *win) {
 		wlr_log(WLR_INFO, "could not resolve backing X11 window id "
 			"(title/class won't be synced, window should still be visible)");
 	}
+
+	/* Size then map in one commit. The X11 backend applies MODE before
+	 * MapWindow so the host WM sees the real client size on MapRequest
+	 * (mouse/center placement). Mapping at the 1024x768 default and
+	 * resizing afterward left the frame where the large window was placed. */
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	if (want_w > 0 && want_h > 0) {
+		wlr_output_state_set_custom_mode(&state, want_w, want_h, 0);
+	}
+	wlr_output_state_set_enabled(&state, true);
+	if (!wlr_output_commit_state(output, &state)) {
+		wlr_log(WLR_ERROR, "failed to map new X11 output at %dx%d",
+			want_w > 0 ? want_w : output->width,
+			want_h > 0 ? want_h : output->height);
+	}
+	wlr_output_state_finish(&state);
+
+	wlr_log(WLR_INFO, "new X11 output committed at %dx%d",
+		output->width, output->height);
+	win->last_output_width = output->width;
+	win->last_output_height = output->height;
 
 	win->l_output = wlr_output_layout_add_auto(server->output_layout, output);
 	win->scene_output = wlr_scene_output_create(server->scene, output);

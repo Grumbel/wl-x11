@@ -275,6 +275,8 @@ int main(int argc, char **argv) {
 			intern_atom(server.xcb, "_NET_WM_STATE_MODAL");
 		server.atom_wm_change_state = intern_atom(server.xcb, "WM_CHANGE_STATE");
 		server.atom_wm_transient_for = intern_atom(server.xcb, "WM_TRANSIENT_FOR");
+		server.atom_wm_normal_hints = intern_atom(server.xcb, "WM_NORMAL_HINTS");
+		server.atom_wm_size_hints = intern_atom(server.xcb, "WM_SIZE_HINTS");
 		server.atom_net_wm_window_type =
 			intern_atom(server.xcb, "_NET_WM_WINDOW_TYPE");
 		server.atom_net_wm_window_type_normal =

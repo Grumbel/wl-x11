@@ -99,6 +99,8 @@ struct wlr_x11_backend {
 	struct {
 		xcb_atom_t wm_protocols;
 		xcb_atom_t wm_delete_window;
+		xcb_atom_t wm_normal_hints;
+		xcb_atom_t wm_size_hints;
 		xcb_atom_t net_wm_name;
 		xcb_atom_t utf8_string;
 		xcb_atom_t variable_refresh;

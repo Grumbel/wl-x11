@@ -412,20 +412,24 @@ static bool output_commit(struct wlr_output *wlr_output,
 		return false;
 	}
 
-	if (state->committed & WLR_OUTPUT_STATE_ENABLED) {
-		if (state->enabled) {
-			xcb_map_window(x11->xcb, output->win);
-		} else {
-			xcb_unmap_window(x11->xcb, output->win);
-		}
-	}
-
+	/* Apply size before MapWindow so the host WM's MapRequest sees the
+	 * real client geometry (mouse/center placement uses the mapped size).
+	 * Mapping first at the backend default (1024x768) and resizing after
+	 * leaves the frame anchored where a large window was placed. */
 	if (state->committed & WLR_OUTPUT_STATE_MODE) {
 		if (!output_set_custom_mode(wlr_output,
 				state->custom_mode.width,
 				state->custom_mode.height,
 				state->custom_mode.refresh)) {
 			return false;
+		}
+	}
+
+	if (state->committed & WLR_OUTPUT_STATE_ENABLED) {
+		if (state->enabled) {
+			xcb_map_window(x11->xcb, output->win);
+		} else {
+			xcb_unmap_window(x11->xcb, output->win);
 		}
 	}
 
@@ -634,12 +638,35 @@ struct wlr_output *wlr_x11_output_create(struct wlr_backend *backend) {
 		x11->transparent_cursor,
 	};
 	output->win = xcb_generate_id(x11->xcb);
+	/* Create at (0,0). Position is intentionally unspecified: we set
+	 * WM_NORMAL_HINTS with only PSize (no USPosition/PPosition) so the
+	 * host WM is free to place the window — typically on the monitor that
+	 * contains the pointer. Setting PPosition or ConfigureWindow(x,y)
+	 * forces global-coordinate placement and often lands on the wrong
+	 * head in multi-monitor setups. */
 	xcb_create_window(x11->xcb, x11->depth->depth, output->win,
 		x11->screen->root, 0, 0, wlr_output->width, wlr_output->height, 0,
 		XCB_WINDOW_CLASS_INPUT_OUTPUT, x11->visualid, mask, values);
 
 	output->win_width = wlr_output->width;
 	output->win_height = wlr_output->height;
+
+	/* ICCCM WM_NORMAL_HINTS: size only. Omitting USPosition and PPosition
+	 * is what tells the window manager it may place the window itself. */
+	if (x11->atoms.wm_normal_hints != XCB_ATOM_NONE &&
+			x11->atoms.wm_size_hints != XCB_ATOM_NONE) {
+		/* Layout matches xcb_size_hints_t / XSizeHints (18 × int32). */
+		int32_t hints[18] = {0};
+		/* PSize | PMinSize only (bits 3 and 4). */
+		hints[0] = (1 << 3) | (1 << 4);
+		hints[3] = (int32_t)wlr_output->width;
+		hints[4] = (int32_t)wlr_output->height;
+		hints[5] = 1;
+		hints[6] = 1;
+		xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, output->win,
+			x11->atoms.wm_normal_hints, x11->atoms.wm_size_hints,
+			32, 18, hints);
+	}
 
 	struct {
 		xcb_input_event_mask_t head;
