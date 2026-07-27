@@ -567,19 +567,6 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 	wlr_output_schedule_frame(win->output);
 }
 
-static void popup_stage_frame(struct wl_listener *listener, void *data) {
-	struct wlx_server *server =
-		wl_container_of(listener, server, popup_stage_frame);
-	(void)data;
-	if (!server->popup_stage_scene_output) {
-		return;
-	}
-	wlr_scene_output_commit(server->popup_stage_scene_output, NULL);
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_scene_output_send_frame_done(server->popup_stage_scene_output, &now);
-}
-
 bool create_bootstrap_output(struct wlx_server *server) {
 	/* Foot and similar clients refuse to start with zero wl_outputs.
 	 * Per-toplevel outputs only appear after a window maps, so advertise
@@ -656,52 +643,6 @@ bool create_bootstrap_output(struct wlx_server *server) {
 	server->bootstrap_scene_output = so;
 	wlr_log(WLR_INFO, "bootstrap virtual monitor %dx%d (for clients that "
 		"require wl_output at connect)", bw, bh);
-
-	/* Shared popup stage: one OR wl_output for all menus, created now so
-	 * opening a menu never adds a new global (Qt was destroying popups
-	 * when a fresh wl_output appeared mid-grab). */
-	struct wlr_output *stage =
-		wlr_x11_output_create_override_redirect(server->backend);
-	if (!stage) {
-		wlr_log(WLR_ERROR, "popup stage: failed to create OR output");
-		return true; /* bootstrap still ok */
-	}
-	wlr_output_init_render(stage, server->allocator, server->renderer);
-	wlr_output_set_name(stage, "WLX-POPUP");
-	wlr_output_set_description(stage, "wl-x11 popup stage");
-	struct wlr_output_state st;
-	wlr_output_state_init(&st);
-	wlr_output_state_set_custom_mode(&st, 1, 1, 0);
-	wlr_output_state_set_enabled(&st, true);
-	if (!wlr_output_commit_state(stage, &st)) {
-		wlr_log(WLR_ERROR, "popup stage: failed to enable");
-		wlr_output_state_finish(&st);
-		wlr_output_destroy(stage);
-		return true;
-	}
-	wlr_output_state_finish(&st);
-	/* Layout slot far from bootstrap and from auto-placed toplevels. */
-	struct wlr_output_layout_output *slo =
-		wlr_output_layout_add(server->output_layout, stage, -bw - 256, -bh - 256);
-	struct wlr_scene_output *sso = wlr_scene_output_create(server->scene, stage);
-	if (sso && slo && server->scene_layout) {
-		wlr_scene_output_layout_add_output(server->scene_layout, slo, sso);
-	}
-	xcb_window_t sxwin = wlr_x11_output_get_window(stage);
-	if (sxwin != XCB_WINDOW_NONE && xconn) {
-		uint32_t svals[] = { (uint32_t)(-bw - 256), (uint32_t)(-bh - 256) };
-		xcb_configure_window(xconn, sxwin,
-			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, svals);
-		xcb_flush(xconn);
-	}
-	server->popup_stage_output = stage;
-	server->popup_stage_l_output = slo;
-	server->popup_stage_scene_output = sso;
-	server->popup_stage_root_x = -bw - 256;
-	server->popup_stage_root_y = -bh - 256;
-	server->popup_stage_frame.notify = popup_stage_frame;
-	wl_signal_add(&stage->events.frame, &server->popup_stage_frame);
-	wlr_log(WLR_INFO, "popup stage ready (shared OR window for xdg_popup)");
 	return true;
 }
 

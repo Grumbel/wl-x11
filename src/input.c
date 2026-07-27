@@ -160,33 +160,12 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = NULL;
 
-	/* Popups use the shared stage OR window — check first. */
-	struct wlx_popup *pop_under = popup_at_root_pointer(server);
-	if (pop_under && pop_under->xdg_popup && pop_under->output) {
-		int16_t px = 0, py = 0;
-		if (query_root_pointer_position(server, &px, &py)) {
-			int ox = server->popup_stage_root_x;
-			int oy = server->popup_stage_root_y;
-			if (pop_under->output != server->popup_stage_output) {
-				int16_t qx = 0, qy = 0;
-				xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
-				if (xwin != XCB_WINDOW_NONE &&
-						query_window_root_position(server, xwin, &qx, &qy)) {
-					ox = qx;
-					oy = qy;
-				}
-			}
-			sx = (double)(px - ox);
-			sy = (double)(py - oy);
-			wlx_pointer_to_surface(server, &sx, &sy);
-			surface = pop_under->xdg_popup->base->surface;
-		}
-	}
-
-	struct wlx_window *under = surface ? NULL : window_at_root_pointer(server);
-	if (!surface && under && under->toplevel &&
+	/* Parent-scene popups are children of the toplevel scene tree. Hit-test
+	 * via the X11 window under the pointer + scene_node_at so menus and
+	 * subsurfaces share one coordinate path. */
+	struct wlx_window *under = window_at_root_pointer(server);
+	if (under && under->toplevel &&
 			pointer_coords_on_window(server, under, &sx, &sy)) {
-		/* sx/sy = output-window-local pixels (where we paint the buffer). */
 		double pix_sx = sx, pix_sy = sy;
 		double log_sx = pix_sx, log_sy = pix_sy;
 		wlx_pointer_to_surface(server, &log_sx, &log_sy);
@@ -194,7 +173,6 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		surface = under->toplevel->base->surface;
 		sx = log_sx;
 		sy = log_sy;
-		/* SSD: host is geometry-sized; buffer origin is inset by geometry. */
 		if (!under->server->prefer_csd) {
 			struct wlr_box geo = under->toplevel->base->current.geometry;
 			if (geo.width > 0 && geo.height > 0) {
@@ -203,7 +181,6 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 			}
 		}
 
-		/* Optional subsurface: node_at needs layout-local (absolute) coords. */
 		if (under->scene_tree) {
 			int ox = 0, oy = 0;
 			wlr_scene_node_coords(&under->scene_tree->node, &ox, &oy);
@@ -217,7 +194,7 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 					wlr_scene_buffer_from_node(node);
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
-				if (ss && ss->surface != under->toplevel->base->surface) {
+				if (ss) {
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
@@ -321,31 +298,6 @@ struct wlr_surface *pointer_enter_surface_under_cursor(
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = NULL;
 
-	struct wlx_popup *pop_under = popup_at_root_pointer(server);
-	if (pop_under && pop_under->xdg_popup && pop_under->output) {
-		int16_t px = 0, py = 0;
-		if (query_root_pointer_position(server, &px, &py)) {
-			/* Prefer our recorded stage origin — X query can lag Configure. */
-			int ox = server->popup_stage_root_x;
-			int oy = server->popup_stage_root_y;
-			if (pop_under->output != server->popup_stage_output) {
-				int16_t qx = 0, qy = 0;
-				xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
-				if (xwin != XCB_WINDOW_NONE &&
-						query_window_root_position(server, xwin, &qx, &qy)) {
-					ox = qx;
-					oy = qy;
-				}
-			}
-			sx = (double)(px - ox);
-			sy = (double)(py - oy);
-			wlx_pointer_to_surface(server, &sx, &sy);
-			surface = pop_under->xdg_popup->base->surface;
-			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-			return surface;
-		}
-	}
-
 	struct wlx_window *win = window_at_root_pointer(server);
 	if (win && win->toplevel &&
 			pointer_coords_on_window(server, win, &sx, &sy)) {
@@ -376,7 +328,7 @@ struct wlr_surface *pointer_enter_surface_under_cursor(
 					wlr_scene_buffer_from_node(node);
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
-				if (ss && ss->surface != win->toplevel->base->surface) {
+				if (ss) {
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
@@ -399,63 +351,26 @@ void wlx_pointer_refresh_focus(struct wlx_server *server) {
 	pointer_enter_surface_under_cursor(server);
 }
 
-/* When a popup maps while the opening button is still held, the matching
- * release must not reach the parent (Qt treats it as click-outside). The
- * xdg_popup grab swallows that if grab is already active; if not, we drop
- * the release at the compositor after updating seat button state via a
- * focus-on-popup enter first. */
-static void handle_pointer_release(struct wlx_server *server,
-		uint32_t time_msec, uint32_t button) {
-	bool grab_active = server->seat->pointer_state.grab !=
-		server->seat->pointer_state.default_grab;
-
-	if (server->swallow_next_pointer_release) {
-		server->swallow_next_pointer_release = false;
-		/* Ensure seat button_count drops. Prefer grab path (swallows when
-		 * focus is not on a popup surface). */
-		if (!grab_active) {
-			/* Enter popup under cursor if any so grab may still be starting;
-			 * then notify release. */
-			struct wlx_popup *pop = popup_at_root_pointer(server);
-			if (pop && pop->xdg_popup) {
-				double sx = 0, sy = 0;
-				int16_t px = 0, py = 0;
-				if (query_root_pointer_position(server, &px, &py)) {
-					sx = (double)(px - server->popup_stage_root_x);
-					sy = (double)(py - server->popup_stage_root_y);
-					wlx_pointer_to_surface(server, &sx, &sy);
-				}
-				wlr_seat_pointer_notify_enter(server->seat,
-					pop->xdg_popup->base->surface, sx, sy);
-			}
-		}
-		wlr_seat_pointer_notify_button(server->seat, time_msec, button,
-			WLR_BUTTON_RELEASED);
-		/* Focus whatever is under the cursor (popup for hover). */
-		pointer_enter_surface_under_cursor(server);
-		wlr_log(WLR_DEBUG, "handled opening-click release (swallow path)");
-		return;
-	}
-
-	wlr_seat_pointer_notify_button(server->seat, time_msec, button,
-		WLR_BUTTON_RELEASED);
-	pointer_enter_surface_under_cursor(server);
-}
-
 void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
 
 	if ((uint32_t)event->state == (uint32_t)WLR_BUTTON_PRESSED) {
-		/* Cancel any stale swallow from a previous open that never released. */
-		server->swallow_next_pointer_release = false;
+		/* Enter before press so the serial targets the surface under the
+		 * cursor. Safe: button_count is 0 so notify_enter will not
+		 * reset_buttons mid-click. */
 		pointer_enter_surface_under_cursor(server);
 		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 			event->button, event->state);
 		return;
 	}
 
-	handle_pointer_release(server, event->time_msec, event->button);
+	/* Release first, then refresh focus. Enter-before-release would
+	 * reset_buttons and drop the matching press. With an active xdg_popup
+	 * grab, release on the parent is swallowed by wlroots (opening click). */
+	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+		event->button, event->state);
+	pointer_enter_surface_under_cursor(server);
 
 	if (server->move_win) {
 		wlr_log(WLR_INFO, "ending self-driven interactive move");
