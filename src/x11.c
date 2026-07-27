@@ -642,10 +642,10 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				dnd_set_xdnd_aware(server, win->xwin);
 				dnd_set_xdnd_aware(server, win->content_xwin);
 				apply_transient_hints(win);
-				xwin_set_motif_decorations(server, win->xwin, false);
+				xwin_set_motif_decorations(server, win->xwin, !server->prefer_csd);
 				if (win->content_xwin != XCB_WINDOW_NONE) {
 					xwin_set_motif_decorations(server,
-						win->content_xwin, false);
+						win->content_xwin, !server->prefer_csd);
 				}
 				/* Host WM often ignores Motif and still wraps us in a
 				 * frame, shrinking the client area (e.g. 531x203 → ~531x176

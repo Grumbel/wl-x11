@@ -560,21 +560,21 @@ void create_output_for_window(struct wlx_window *win) {
 	memset(win->related, 0, sizeof(win->related));
 	win->size_from_wm = false;
 
-	/* Transient dialogs: host WMs ignore Motif and reparent into a frame,
-	 * shrinking the client area and clipping CSD/buffer (e.g. 569x203 →
-	 * ~569x176). Override-redirect skips the WM entirely — same path as
-	 * xdg_popup menus, which never clip. Main windows stay managed. */
+	/* With --csd, transient dialogs use override-redirect so the host WM
+	 * cannot reparent/shrink the buffer (CSD shadows stay visible). Without
+	 * --csd, dialogs stay managed and get normal host decorations. */
 	bool is_transient = win->toplevel && win->toplevel->parent != NULL;
-	struct wlr_output *output = is_transient
+	bool use_or = is_transient && server->prefer_csd;
+	struct wlr_output *output = use_or
 		? wlr_x11_output_create_override_redirect(server->backend)
 		: wlr_x11_output_create(server->backend);
 	if (!output) {
 		wlr_log(WLR_ERROR, "failed to create X11 output for new toplevel");
 		return;
 	}
-	if (is_transient) {
+	if (use_or) {
 		wlr_log(WLR_INFO, "transient toplevel → override-redirect X11 window "
-			"(avoid host frame clipping)");
+			"(--csd, avoid host frame clipping)");
 	}
 	win->output = output;
 	output->data = win;
@@ -606,10 +606,8 @@ void create_output_for_window(struct wlx_window *win) {
 		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
-		/* Strip host title/border. GTK/Qt draw their own chrome; host
-		 * decorations shrink the content window (e.g. 531x203 → ~531x176)
-		 * and clip dialog bottoms. */
-		xwin_set_motif_decorations(server, win->xwin, false);
+		/* --csd: no host border (client draws chrome). Default: host SSD. */
+		xwin_set_motif_decorations(server, win->xwin, !server->prefer_csd);
 		/* Size hints before MapWindow (no position flags). last_* not set
 		 * yet — pass preferred size via a temporary so win_sync works. */
 		win->last_output_width = want_w > 0 ? want_w : output->width;
@@ -627,7 +625,7 @@ void create_output_for_window(struct wlx_window *win) {
 			apply_transient_hints(win);
 			xwin_set_title(server, win->content_xwin, win->toplevel->title);
 			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
-			xwin_set_motif_decorations(server, win->content_xwin, false);
+			xwin_set_motif_decorations(server, win->content_xwin, !server->prefer_csd);
 			win_sync_size_hints(win);
 			dnd_set_xdnd_aware(server, win->content_xwin);
 			if (server->xcb) {
@@ -667,7 +665,7 @@ void create_output_for_window(struct wlx_window *win) {
 	win->last_output_height = output->height;
 
 	/* OR dialogs need an explicit root position (no WM placement). */
-	if (is_transient && win->xwin != XCB_WINDOW_NONE && server->xcb) {
+	if (use_or && win->xwin != XCB_WINDOW_NONE && server->xcb) {
 		struct wlx_window *parent_win = NULL;
 		if (win->toplevel->parent && win->toplevel->parent->base) {
 			parent_win = win->toplevel->parent->base->data;
