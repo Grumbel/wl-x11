@@ -87,10 +87,13 @@ fine):
 
 ```sh
 DISPLAY=:0 ./build/wl-x11
+# optional: --csd / --ssd, --debug, and/or a command to launch:
+# DISPLAY=:0 ./build/wl-x11 --debug foot
 ```
 
 It prints the `WAYLAND_DISPLAY` it created a socket on. Point Wayland
-clients at it:
+clients at it (or pass the client as arguments so `WAYLAND_DISPLAY` is set
+for that process only):
 
 ```sh
 WAYLAND_DISPLAY=wayland-1 foot
@@ -105,39 +108,44 @@ decorated X11 window under your host window manager.
 
 This is intentionally minimal, in the spirit of a "one file you can read
 in one sitting" compositor (à la wlroots' `tinywl.c`), adapted to the
-one-window-per-toplevel model. Notable things it does **not** do:
+one-window-per-toplevel model.
 
-- **Popups get clipped at the window edge.** A dropdown/menu that would
-  visually extend past its parent toplevel's bounds is clipped, because
-  the toplevel's entire visible area *is* the X11 window — there's no
-  extra canvas to draw into (unlike Xwayland rootless mode, which gives
-  popups their own override-redirect X windows).
-- **Text-only host X11 clipboard + PRIMARY bridge.** `text/plain` is
-  mirrored between the Wayland seat selection and host `CLIPBOARD`, and
-  between `zwp_primary_selection_v1` and host `PRIMARY` (middle-click).
-  Images and other MIME types are not bridged; large INCR transfers are
-  ignored. PRIMARY is optional on pure Wayland; many toolkits still use it.
-- **Drag-and-drop.** Wayland↔Wayland DnD works via the seat. Bridging to
-  host X11 uses XDND for `text/plain` and `text/uri-list` only. Drops from
-  X11 onto a nested window are imported into the Wayland selection (paste)
-  rather than injected as a surface-local drop (no grab serial from X11).
-- **Cursor via the X11 backend output-cursor path.** Client
-  `wl_pointer.set_cursor` surfaces are forwarded with
-  `wlr_cursor_set_surface`; the X11 backend turns them into real X cursors
-  on each output window. Outside client surfaces a theme `left_ptr` is
-  shown. There is no separate compositor-drawn cursor overlay.
-- **Window title/class syncing.** The vendored X11 backend exposes
-  `wlr_x11_output_get_window()` so the compositor can set `WM_NAME` /
-  `WM_CLASS` / ICCCM hints on the real host window before map. A side-channel
-  XCB connection is still used for property writes and event monitoring.
-- **Keyboard focus follows pointer**, click-to-focus on button press; no
-  alt-tab / window switching is implemented (that's the host WM's job for
-  the X11 windows anyway).
-- No layer-shell, no server-side decorations, no xdg-decoration
-  negotiation — clients that insist on drawing client-side decorations
-  will show them nested inside the (also decorated) host X11 window. Most
-  modern toolkits (GTK4, Qt) default to no CSD when the compositor doesn't
-  advertise `xdg-decoration` support in the way they expect.
+### Popups
+
+`xdg_popup` surfaces (menus, combo dropdowns, tooltips) are placed in the
+**parent toplevel’s scene tree** and drawn in the same X11 window. Input and
+grabs stay simple; the menu moves with the parent. Content that would extend
+past the parent edge is **clipped**.
+
+Override-redirect / extra `wlr_output` windows per popup were tried and
+rejected (new `wl_output` globals break Qt; dual-window input is fragile).
+A possible future approach is temporarily expanding the parent window while
+a popup is open — more practical with `--csd` than with host SSD. See
+[TODO.md](TODO.md).
+
+### Decorations
+
+By default the compositor prefers **server-side decorations** (host WM
+chrome) via `xdg-decoration` and `org_kde_kwin_server_decoration`. Pass
+`--csd` for client-side decorations (client-drawn title/shadows; host frame
+suppressed where possible). `--ssd` is explicit for the default.
+
+### Other limitations
+
+- **Bootstrap virtual monitor.** A hidden `wl_output` is created at startup
+  so clients that require ≥1 monitor at connect (e.g. foot) can start before
+  any toplevel maps. It is not a real desktop surface.
+- **Text-only host X11 clipboard + PRIMARY bridge.** `text/plain` on
+  `CLIPBOARD` and `PRIMARY`. Images/other MIME and large `INCR` transfers
+  are not bridged.
+- **Drag-and-drop.** Wayland↔Wayland DnD works. Host XDND bridges
+  `text/plain` and `text/uri-list` only; X11→Wayland drops become selection
+  paste rather than a surface-local drop.
+- **Cursor** via the X11 backend output-cursor path (`wl_pointer.set_cursor`
+  → real X cursor per window); theme `left_ptr` otherwise.
+- **Focus** tracks the host WM’s X11 focus (and pointer enter); no
+  compositor-side alt-tab (that’s the host WM’s job).
+- **No layer-shell.**
 
 ## API version note
 

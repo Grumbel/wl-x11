@@ -75,9 +75,9 @@ Transients still use `WM_TRANSIENT_FOR` / dialog type via
 |------|------|
 | `src/main.c` | Startup, globals, seat, decorations |
 | `src/output.c` | Per-toplevel X11 output create/map/resize, size hints |
-| `src/xdg.c` | xdg_toplevel map/unmap/commit |
+| `src/xdg.c` | xdg_toplevel + xdg_popup (parent-scene placement) |
 | `src/x11.c` | Side-channel XCB (title, class, focus, properties) |
-| `src/input.c` | Pointer/keyboard, interactive move/resize |
+| `src/input.c` | Pointer/keyboard; coords from X11 root, not layout cursor |
 | `src/move_resize.c` | Host configure during drag |
 | `src/clipboard.c` | CLIPBOARD / PRIMARY text bridge |
 | `src/dnd.c` | Limited XDND bridge |
@@ -97,9 +97,18 @@ meson setup build && ninja -C build
 Run under an existing X11 session (`DISPLAY=:0 ./build/wl-x11`), then point
 clients at the printed `WAYLAND_DISPLAY`.
 
+## Popups
+
+Keep popups in the **parent scene / same X11 window**. Do not reintroduce
+per-popup or shared OR `wlr_output`s without a present path that is not a
+full output (see [TODO.md](TODO.md)). Pointer hit-testing must use real X11
+window geometry, not `wlr_output_layout` positions.
+
 ## When changing behavior
 
 - Prefer ICCCM/EWMH-correct behavior over compositor-side hacks.
 - Keep comments that explain *why* position is unspecified and why size is
   applied before map — those were hard-won.
+- Never call `wlr_seat_pointer_notify_enter` while a button is held if it
+  would change the focused surface — that resets seat buttons mid-click.
 - Update [TODO.md](TODO.md) when finishing or retiring an item.
