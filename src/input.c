@@ -195,10 +195,11 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
 				if (ss) {
+					/* hx/hy are surface-local (wlroots maps dest→buffer
+					 * when dst_size differs for --scale). */
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
-					wlx_pointer_to_surface(server, &sx, &sy);
 				}
 			}
 		}
@@ -329,10 +330,11 @@ struct wlr_surface *pointer_enter_surface_under_cursor(
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
 				if (ss) {
+					/* hx/hy are surface-local (wlroots maps dest→buffer
+					 * when dst_size differs for --scale). */
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
-					wlx_pointer_to_surface(server, &sx, &sy);
 				}
 			}
 		}

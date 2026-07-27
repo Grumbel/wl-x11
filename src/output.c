@@ -48,7 +48,25 @@ void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy) {
  * buffers; the X11 window is logical*scale. Re-run after each surface commit
  * because wlr_scene_xdg_surface resets dest size on commit.
  */
-static void scene_node_apply_scale(struct wlr_scene_node *node, double scale) {
+static bool scene_node_is_popup_root(struct wlx_server *server,
+		struct wlr_scene_node *node) {
+	if (!server || !node) {
+		return false;
+	}
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &server->popups, link) {
+		if (pop->scene_tree && &pop->scene_tree->node == node) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Scale buffer dest sizes. Optionally multiply child positions by scale
+ * (toplevel/subsurface path). Popup roots keep positions set by
+ * popup_position_and_map (already in output pixels). */
+static void scene_node_apply_scale(struct wlr_scene_node *node, double scale,
+		struct wlx_server *server, bool scale_positions) {
 	if (!node || !node->enabled) {
 		return;
 	}
@@ -69,13 +87,20 @@ static void scene_node_apply_scale(struct wlr_scene_node *node, double scale) {
 		struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &tree->children, link) {
-			int ox = child->x;
-			int oy = child->y;
-			if (ox != 0 || oy != 0) {
-				wlr_scene_node_set_position(child,
-					(int)lround(ox * scale), (int)lround(oy * scale));
+			bool popup_root = scene_node_is_popup_root(server, child);
+			if (scale_positions && !popup_root) {
+				int ox = child->x;
+				int oy = child->y;
+				if (ox != 0 || oy != 0) {
+					wlr_scene_node_set_position(child,
+						(int)lround(ox * scale), (int)lround(oy * scale));
+				}
 			}
-			scene_node_apply_scale(child, scale);
+			/* Popup roots: only refresh buffer dest sizes here. Their
+			 * position and internal offsets are set in
+			 * popup_position_and_map / wlx_apply_popup_content_scale. */
+			scene_node_apply_scale(child, scale, server,
+				popup_root ? false : scale_positions);
 		}
 	}
 }
@@ -88,7 +113,20 @@ void wlx_apply_content_scale(struct wlx_window *win) {
 	if (scale <= 0.0 || scale == 1.0) {
 		return;
 	}
-	scene_node_apply_scale(&win->scene_tree->node, scale);
+	scene_node_apply_scale(&win->scene_tree->node, scale, win->server, true);
+}
+
+void wlx_apply_popup_content_scale(struct wlx_popup *pop) {
+	if (!pop || !pop->server || !pop->scene_tree) {
+		return;
+	}
+	double scale = pop->server->content_scale;
+	if (scale <= 0.0 || scale == 1.0) {
+		return;
+	}
+	/* Position is set in output pixels by popup_position_and_map; only
+	 * enlarge buffers and internal subsurface offsets. */
+	scene_node_apply_scale(&pop->scene_tree->node, scale, pop->server, true);
 }
 
 void output_frame(struct wl_listener *listener, void *data) {
@@ -97,9 +135,13 @@ void output_frame(struct wl_listener *listener, void *data) {
 		return;
 	}
 
-	/* Always present at the client's native buffer size (no stretch). During
-	 * hold_present the last buffer is letterboxed on a transparent clear so
-	 * resize does not flash fully empty, without scaling drop-shadows. */
+	/* wlr_scene_xdg_surface resets dest sizes on commit; keep --scale applied
+	 * on every frame so resize intermediates are not briefly 1×. */
+	wlx_apply_content_scale(win);
+
+	/* Present scene at dest sizes (scaled). During hold_present the last
+	 * client buffer is letterboxed on a transparent clear until the client
+	 * catches up — no stretch (would smear ARGB shadows). */
 	wlr_scene_output_commit(win->scene_output, NULL);
 
 	struct timespec now;
@@ -130,10 +172,12 @@ void output_commit(struct wl_listener *listener, void *data) {
 	win->last_output_width = w;
 	win->last_output_height = h;
 	if (had_frame) {
-		/* Paint immediately with the last client buffer at native size
-		 * (letterboxed). Stretching filled the hole but corrupted ARGB
+		/* Paint immediately with the last client buffer (letterboxed).
+		 * Re-apply scale first — output resize alone does not run
+		 * surface_commit. Stretching filled the hole but corrupted ARGB
 		 * shadows; skipping paint left a fully transparent flash. */
 		win->hold_present = true;
+		wlx_apply_content_scale(win);
 		if (win->scene_output) {
 			wlr_scene_output_commit(win->scene_output, NULL);
 		}

@@ -384,6 +384,21 @@ static bool scene_buffer_point_accepts_input(struct wlr_scene_buffer *scene_buff
 	struct wlr_scene_surface *scene_surface =
 		wlr_scene_surface_try_from_buffer(scene_buffer);
 
+	/* When dest size differs from the buffer (e.g. compositor --scale),
+	 * node_at feeds dest-local coordinates; map them to buffer-local so
+	 * the full scaled area accepts input with correct surface coords. */
+	if (scene_buffer->dst_width > 0 && scene_buffer->dst_height > 0 &&
+			scene_surface->surface) {
+		int bw = scene_surface->surface->current.width;
+		int bh = scene_surface->surface->current.height;
+		if (bw > 0 && bh > 0 &&
+				(scene_buffer->dst_width != bw ||
+				 scene_buffer->dst_height != bh)) {
+			*sx = *sx * (double)bw / (double)scene_buffer->dst_width;
+			*sy = *sy * (double)bh / (double)scene_buffer->dst_height;
+		}
+	}
+
 	*sx += scene_surface->clip.x;
 	*sy += scene_surface->clip.y;
 

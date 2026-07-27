@@ -536,7 +536,12 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	}
 
 	wlr_scene_node_reparent(&pop->scene_tree->node, parent->scene_tree);
-	wlr_scene_node_set_position(&pop->scene_tree->node, lx, ly);
+	/* Scene graph is in output pixels when --scale is set. */
+	double scale = pop->server->content_scale > 0.0
+		? pop->server->content_scale : 1.0;
+	int sx = (int)lround(lx * scale);
+	int sy = (int)lround(ly * scale);
+	wlr_scene_node_set_position(&pop->scene_tree->node, sx, sy);
 	wlr_scene_node_set_enabled(&pop->scene_tree->node, true);
 
 	struct wlr_scene_node *child;
@@ -546,8 +551,11 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 
 	pop->output = NULL; /* not a separate output */
 
-	wlr_log(WLR_INFO, "xdg_popup place in parent scene at (%d,%d) size %dx%d",
-		lx, ly,
+	wlx_apply_popup_content_scale(pop);
+
+	wlr_log(WLR_INFO, "xdg_popup place in parent scene at (%d,%d) [scaled %d,%d] "
+		"size %dx%d",
+		lx, ly, sx, sy,
 		xdg->base->surface ? xdg->base->surface->current.width : 0,
 		xdg->base->surface ? xdg->base->surface->current.height : 0);
 

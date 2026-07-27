@@ -483,6 +483,7 @@ void output_destroy(struct wl_listener *listener, void *data);
 int wlx_scale_size(struct wlx_server *server, int logical);
 int wlx_unscale_size(struct wlx_server *server, int output_px);
 void wlx_apply_content_scale(struct wlx_window *win);
+void wlx_apply_popup_content_scale(struct wlx_popup *pop);
 void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy);
 /* Re-resolve pointer focus from the real X11 pointer (after popup map/unmap). */
 void wlx_pointer_refresh_focus(struct wlx_server *server);
