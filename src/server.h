@@ -84,6 +84,10 @@ struct wlx_server {
 	struct wlr_scene *scene;
 	struct wlr_scene_output_layout *scene_layout;
 	struct wlr_output_layout *output_layout;
+	/* Always-on virtual monitor so clients that require ≥1 wl_output at
+	 * connect (foot, etc.) can start before any toplevel is mapped. */
+	struct wlr_output *bootstrap_output;
+	struct wlr_scene_output *bootstrap_scene_output;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
@@ -426,6 +430,8 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data);
 
 /* output.c */
 void create_output_for_window(struct wlx_window *win);
+/* Advertise a permanent wl_output before any client toplevel exists. */
+bool create_bootstrap_output(struct wlx_server *server);
 void resize_output_to(struct wlx_window *win, int w, int h);
 
 /* xdg.c */

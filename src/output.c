@@ -567,6 +567,85 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 	wlr_output_schedule_frame(win->output);
 }
 
+bool create_bootstrap_output(struct wlx_server *server) {
+	/* Foot and similar clients refuse to start with zero wl_outputs.
+	 * Per-toplevel outputs only appear after a window maps, so advertise
+	 * a permanent virtual monitor sized to the X root (or 1920x1080).
+	 * Override-redirect + parked off-layout keeps it invisible. */
+	if (!server || !server->backend || server->bootstrap_output) {
+		return server && server->bootstrap_output != NULL;
+	}
+
+	int bw = 1920, bh = 1080;
+	if (server->xcb && !xcb_connection_has_error(server->xcb)) {
+		const xcb_setup_t *setup = xcb_get_setup(server->xcb);
+		xcb_screen_iterator_t it = xcb_setup_roots_iterator(setup);
+		if (it.data) {
+			bw = it.data->width_in_pixels;
+			bh = it.data->height_in_pixels;
+			if (bw < 640) {
+				bw = 640;
+			}
+			if (bh < 480) {
+				bh = 480;
+			}
+		}
+	}
+
+	struct wlr_output *output =
+		wlr_x11_output_create_override_redirect(server->backend);
+	if (!output) {
+		wlr_log(WLR_ERROR, "bootstrap: failed to create virtual output");
+		return false;
+	}
+	wlr_output_init_render(output, server->allocator, server->renderer);
+	wlr_output_set_name(output, "WLX-BOOT");
+	wlr_output_set_description(output, "wl-x11 virtual monitor");
+
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_custom_mode(&state, bw, bh, 0);
+	wlr_output_state_set_enabled(&state, true);
+	if (!wlr_output_commit_state(output, &state)) {
+		wlr_log(WLR_ERROR, "bootstrap: failed to enable virtual output");
+		wlr_output_state_finish(&state);
+		wlr_output_destroy(output);
+		return false;
+	}
+	wlr_output_state_finish(&state);
+
+	/* Park far off the positive layout origin so it does not sit under
+	 * real per-toplevel outputs (layout_add_auto places those at ≥0). */
+	struct wlr_output_layout_output *lo =
+		wlr_output_layout_add(server->output_layout, output, -bw - 256, 0);
+	if (!lo) {
+		wlr_log(WLR_ERROR, "bootstrap: failed to add virtual output to layout");
+		wlr_output_destroy(output);
+		return false;
+	}
+	struct wlr_scene_output *so =
+		wlr_scene_output_create(server->scene, output);
+	if (so && server->scene_layout) {
+		wlr_scene_output_layout_add_output(server->scene_layout, lo, so);
+	}
+
+	/* Move the X11 window off-screen so the host never shows a blank frame. */
+	xcb_window_t xwin = wlr_x11_output_get_window(output);
+	xcb_connection_t *xconn = wlr_x11_backend_get_connection(server->backend);
+	if (xwin != XCB_WINDOW_NONE && xconn) {
+		uint32_t vals[] = { (uint32_t)(-bw - 256), 0 };
+		xcb_configure_window(xconn, xwin,
+			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+		xcb_flush(xconn);
+	}
+
+	server->bootstrap_output = output;
+	server->bootstrap_scene_output = so;
+	wlr_log(WLR_INFO, "bootstrap virtual monitor %dx%d (for clients that "
+		"require wl_output at connect)", bw, bh);
+	return true;
+}
+
 void create_output_for_window(struct wlx_window *win) {
 	struct wlx_server *server = win->server;
 

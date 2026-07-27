@@ -368,6 +368,13 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	/* Must exist before any client connects: foot and others refuse to
+	 * start with zero wl_outputs. Per-toplevel outputs only appear on map. */
+	if (!create_bootstrap_output(&server)) {
+		fprintf(stderr, "wl-x11: warning: no bootstrap monitor; some clients "
+			"(e.g. foot) may fail to start\n");
+	}
+
 	setenv("WAYLAND_DISPLAY", socket, true);
 
 	server.client_created.notify = client_created_notify;
