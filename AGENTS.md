@@ -34,6 +34,28 @@ re-applying those fixes. Prefer extending the vendored tree when a change
 belongs in the X11 backend. When upstreaming, these are the candidates for
 a `wlr_x11_rootless`-style feature flag.
 
+### What to open in `subprojects/wlroots`
+
+Build is **X11-only** (`backends=x11`, `session=disabled`, `xwayland=disabled`,
+`renderers=gles2`). Unused trees were removed so agents do not wander into
+them.
+
+**Relevant:**
+
+| Path | Why |
+|------|-----|
+| `backend/x11/` | Nested window backend; **local patches live here** |
+| `backend/backend.c`, `backend/multi/` | Backend plumbing (still linked) |
+| Headers matching `#include <wlr/...>` in `src/` | Public API the compositor uses |
+| `types/` for scene, seat, xdg_shell, output, data_device, compositor, cursor, primary_selection | Core types used by `src/` |
+| `render/` (gles2 + shared allocator path) | Rendering |
+
+**Ignore unless a task explicitly names them:**
+
+- `backend/wayland/`, `backend/headless/` (always compiled by upstream layout, not used by wl-x11)
+- Other `types/wlr_*.c` protocols (layer-shell, foreign-toplevel, screencopy, tablet, session-lock, …) — linked but never created by this compositor
+- DRM, libinput, session, Xwayland, examples, tinywl, tests, docs — **deleted** from this fork
+
 ## Placement rules (do not regress)
 
 For ordinary top-levels:
