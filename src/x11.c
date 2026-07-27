@@ -495,7 +495,7 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_request_state);
 	const struct wlr_output_event_request_state *event = data;
 
-	wlr_log(WLR_INFO, "output requested state (backend-detected resize) "
+	wlr_log(WLR_DEBUG, "output requested state (backend-detected resize) "
 		"-> accepting");
 	/* Host WM or user resized the X11 window — stop auto-fitting to
 	 * client geometry on subsequent commits. */
@@ -563,7 +563,7 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 			} else {
 				struct wlx_window *win = window_from_xwin(server, fi->event);
 				if (win) {
-					wlr_log(WLR_INFO, "X11 FocusIn on 0x%x (mode %u detail %u)",
+					wlr_log(WLR_DEBUG, "X11 FocusIn on 0x%x (mode %u detail %u)",
 						fi->event, fi->mode, fi->detail);
 					set_active_window(server, win);
 					/* If the pointer is already over this window, re-enter
@@ -597,12 +597,12 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				if (win && server->focused_window == win) {
 					struct wlx_window *under = window_at_root_pointer(server);
 					if (under && under != win) {
-						wlr_log(WLR_INFO, "X11 FocusOut on 0x%x — focus moving to "
+						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x — focus moving to "
 							"another of our windows, not clearing", fo->event);
 					} else if (under == win) {
 						/* Spurious focus churn inside the same toplevel. */
 					} else {
-						wlr_log(WLR_INFO, "X11 FocusOut on 0x%x (mode %u detail %u)",
+						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x (mode %u detail %u)",
 							fo->event, fo->mode, fo->detail);
 						set_active_window(server, NULL);
 					}
@@ -676,7 +676,7 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 							cn->x - server->drag_last_requested_x;
 						int new_correction_y =
 							cn->y - server->drag_last_requested_y;
-						wlr_log(WLR_INFO, "[DIAG] real ConfigureNotify for "
+						wlr_log(WLR_DEBUG, "[DIAG] real ConfigureNotify for "
 							"dragged window 0x%x: pos=(%d,%d) size=%dx%d "
 							"border=%d (learned correction now (%d,%d), "
 							"was (%d,%d))", cn->window, cn->x, cn->y,

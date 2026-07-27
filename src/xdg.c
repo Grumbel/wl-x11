@@ -40,7 +40,7 @@ void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 
 void surface_commit(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, commit);
-	wlr_log(WLR_INFO, "surface commit (mapped=%d, has_buffer=%d)",
+	wlr_log(WLR_DEBUG, "surface commit (mapped=%d, has_buffer=%d)",
 		win->output != NULL,
 		win->toplevel->base->surface->buffer != NULL);
 
@@ -136,7 +136,9 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			win->toplevel->pending.maximized ||
 			win->toplevel->current.fullscreen ||
 			win->toplevel->pending.fullscreen;
-		bool grow_csd = win->server->prefer_csd && !tiled &&
+		bool has_csd = win->server->prefer_csd ||
+			win->csd_margin_w > 0 || win->csd_margin_h > 0;
+		bool grow_csd = has_csd && !tiled &&
 			(out_w > win->output->width || out_h > win->output->height);
 		bool fit = !win->size_from_wm &&
 			(out_w != win->output->width || out_h != win->output->height);
@@ -150,7 +152,7 @@ void surface_commit(struct wl_listener *listener, void *data) {
 					out_h = win->output->height;
 				}
 			}
-			wlr_log(WLR_INFO, "fitting X11 window to client %dx%d "
+			wlr_log(WLR_DEBUG, "fitting X11 window to client %dx%d "
 				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
 				cw, ch, conf_w, conf_h,
 				win->csd_margin_w, win->csd_margin_h,
@@ -166,17 +168,17 @@ void surface_commit(struct wl_listener *listener, void *data) {
 
 	/* wlr_scene_xdg_surface places the surface tree at (-geometry.x,
 	 * -geometry.y) so geometry sits at the node origin. Correct for
-	 * geometry-sized SSD hosts. With --csd the host is buffer-sized
-	 * (shadow included); force (0,0) so content/damage match the X11
-	 * window. Maximized/fullscreen clients drop shadow offsets — also
-	 * force (0,0) so a residual geometry origin does not shift hit-tests.
-	 * Scene's commit listener is registered first and runs before this. */
+	 * geometry-sized SSD hosts. When the client draws CSD (buffer >
+	 * geometry) the host is buffer-sized — force (0,0) so shadows match
+	 * the X11 window. Same when maximized/fullscreen. */
 	bool tiled = win->toplevel &&
 		(win->toplevel->current.maximized ||
 		 win->toplevel->pending.maximized ||
 		 win->toplevel->current.fullscreen ||
 		 win->toplevel->pending.fullscreen);
-	if ((win->server->prefer_csd || tiled) && win->scene_tree) {
+	bool has_csd = win->server->prefer_csd ||
+		win->csd_margin_w > 0 || win->csd_margin_h > 0;
+	if ((has_csd || tiled) && win->scene_tree) {
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &win->scene_tree->children, link) {
 			wlr_scene_node_set_position(child, 0, 0);
@@ -478,9 +480,11 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	int lx = 0, ly = 0;
 	wlr_xdg_popup_get_toplevel_coords(xdg, 0, 0, &lx, &ly);
 
-	/* With CSD, parent X window is buffer-sized; geometry origin is at
-	 * (csd margin/2) roughly — use geometry box if available. */
-	if (parent->server->prefer_csd && parent->toplevel) {
+	/* Parent X window is buffer-sized when the client draws CSD; geometry
+	 * origin is inset — shift popup placement by the geometry offset. */
+	if (parent->toplevel &&
+			(parent->server->prefer_csd ||
+			 parent->csd_margin_w > 0 || parent->csd_margin_h > 0)) {
 		struct wlr_box geo = parent->toplevel->base->current.geometry;
 		if (geo.width > 0) {
 			lx += geo.x;
@@ -502,10 +506,16 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	}
 
 	/* Place scene tree at this output's layout origin so the scene_output
-	 * samples the popup content. */
+	 * samples the popup content. The OR window is sized to the full
+	 * buffer; force children to (0,0) so xdg's (-geometry) placement does
+	 * not clip shadows/padding (same as CSD toplevels). */
 	if (pop->l_output && pop->scene_tree) {
 		wlr_scene_node_set_position(&pop->scene_tree->node,
 			pop->l_output->x, pop->l_output->y);
+		struct wlr_scene_node *child;
+		wl_list_for_each(child, &pop->scene_tree->children, link) {
+			wlr_scene_node_set_position(child, 0, 0);
+		}
 	}
 	wlr_output_schedule_frame(pop->output);
 }
@@ -625,5 +635,8 @@ static void handle_new_xdg_popup(struct wl_listener *listener, void *data) {
 void window_new_popup(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, new_popup);
 	struct wlr_xdg_popup *xdg_popup = data;
+	wlr_log(WLR_INFO, "xdg_popup from toplevel \"%s\" (app_id \"%s\")",
+		win->toplevel && win->toplevel->title ? win->toplevel->title : "",
+		win->toplevel && win->toplevel->app_id ? win->toplevel->app_id : "");
 	setup_popup(win->server, xdg_popup, win);
 }

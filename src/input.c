@@ -77,7 +77,7 @@ void update_interactive_drag(struct wlx_server *server) {
 		int y = py + server->move_offset_y - server->drag_correction_y;
 		server->drag_last_requested_x = x;
 		server->drag_last_requested_y = y;
-		wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window "
+		wlr_log(WLR_DEBUG, "[DIAG] pointer at (%d,%d) -> requesting window "
 			"0x%x at (%d,%d) (correction (%d,%d))", px, py,
 			target, x, y, server->drag_correction_x,
 			server->drag_correction_y);
@@ -123,7 +123,7 @@ void update_interactive_drag(struct wlx_server *server) {
 	server->drag_last_requested_x = x;
 	server->drag_last_requested_y = y;
 
-	wlr_log(WLR_INFO, "[DIAG] pointer at (%d,%d) -> requesting window 0x%x "
+	wlr_log(WLR_DEBUG, "[DIAG] pointer at (%d,%d) -> requesting window 0x%x "
 		"at (%d,%d) %dx%d (correction (%d,%d))", px, py,
 		target, x, y, w, h, server->drag_correction_x,
 		server->drag_correction_y);

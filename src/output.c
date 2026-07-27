@@ -111,7 +111,7 @@ void output_commit(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_commit);
 	(void)data;
 
-	wlr_log(WLR_INFO, "output commit event (current size %dx%d, last known %dx%d)",
+	wlr_log(WLR_DEBUG, "output commit event (current size %dx%d, last known %dx%d)",
 		win->output->width, win->output->height,
 		win->last_output_width, win->last_output_height);
 
@@ -142,7 +142,7 @@ void output_commit(struct wl_listener *listener, void *data) {
 		wlr_output_schedule_frame(win->output);
 	}
 
-	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
+	wlr_log(WLR_DEBUG, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
 		/* Client sees logical window geometry; host may be larger by CSD
 		 * shadow margin. Maximized/fullscreen drop the shadow — never
@@ -227,15 +227,15 @@ void output_destroy(struct wl_listener *listener, void *data) {
 }
 
 /* Preferred host window size (logical pixels before content_scale).
- * SSD (default): xdg window geometry — excludes CSD shadow so we don't
- * show black padding without alpha.
- * CSD (--csd): full surface buffer size so GTK/Qt resize edges and
- * shadows in the margin outside geometry are not clipped. */
+ * When the client draws CSD (buffer larger than window geometry) — either
+ * because of --csd or because GTK/Qt did so anyway — use the full buffer
+ * so shadows/padding are not clipped. Otherwise use xdg geometry. */
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	int w = 0, h = 0;
 	if (win->toplevel && win->toplevel->base) {
 		struct wlr_surface *surf = win->toplevel->base->surface;
-		bool csd = win->server && win->server->prefer_csd;
+		bool csd = (win->server && win->server->prefer_csd) ||
+			win->csd_margin_w > 0 || win->csd_margin_h > 0;
 		if (csd && surf && surf->current.width > 0 && surf->current.height > 0) {
 			w = surf->current.width;
 			h = surf->current.height;
