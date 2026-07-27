@@ -445,6 +445,11 @@ static void popup_destroy_output(struct wlx_popup *pop) {
 	if (!pop->output) {
 		return;
 	}
+	/* Never destroy the shared popup stage. */
+	if (pop->server && pop->output == pop->server->popup_stage_output) {
+		pop->output = NULL;
+		return;
+	}
 	wlr_output_destroy(pop->output);
 	/* output_destroy listener clears fields */
 }
@@ -494,19 +499,23 @@ bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win) 
 	return false;
 }
 
-/* Position the popup in the parent's scene tree (no separate OR window).
- * Separate OR outputs were mapping under X11 and Qt destroyed the popup
- * within ~4ms for both mouse and keyboard (destroy_xdg_popup while still
- * mapped) — independent of button grab handling. In-parent scene placement
- * is how tinywl/sway treat nested popups and avoids that race. Menus that
- * extend past the parent window will clip until OR is re-enabled safely. */
+/* Place popup on the shared popup-stage OR window (created at startup).
+ * Per-popup OR outputs advertised a new wl_output mid-grab and Qt destroyed
+ * the menu within ~4ms. Reusing one pre-advertised stage avoids that. */
 static void popup_position_and_map(struct wlx_popup *pop) {
 	struct wlx_window *parent = pop->parent;
-	if (!parent || !parent->scene_tree || !pop->scene_tree) {
+	struct wlx_server *server = pop->server;
+	if (!parent || !pop->scene_tree || !server || !server->popup_stage_output) {
 		return;
 	}
 
 	struct wlr_xdg_popup *xdg = pop->xdg_popup;
+	struct wlr_surface *surf = xdg->base->surface;
+	int width = surf && surf->current.width > 0 ? surf->current.width : 1;
+	int height = surf && surf->current.height > 0 ? surf->current.height : 1;
+	int pw = wlx_scale_size(server, width);
+	int ph = wlx_scale_size(server, height);
+
 	int lx = xdg->current.geometry.x;
 	int ly = xdg->current.geometry.y;
 	if (lx == 0 && ly == 0 &&
@@ -515,37 +524,81 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 		ly = xdg->scheduled.geometry.y;
 	}
 
-	/* Ensure popup scene is parented under the toplevel scene tree. */
-	wlr_scene_node_reparent(&pop->scene_tree->node, parent->scene_tree);
+	/* Parent surface origin in root coordinates. */
+	int16_t root_x = 0, root_y = 0;
+	xcb_window_t parent_xwin = parent->content_xwin != XCB_WINDOW_NONE
+		? parent->content_xwin : parent->xwin;
+	struct wlr_xdg_surface *parent_xdg =
+		wlr_xdg_surface_try_from_wlr_surface(xdg->parent);
+	if (parent_xdg && parent_xdg->role == WLR_XDG_SURFACE_ROLE_POPUP &&
+			parent_xdg->popup && parent_xdg->data) {
+		/* Nested popup: position relative to stage is handled via geometry
+		 * chain; still anchor to the same stage window. */
+	}
+	query_window_root_position(server, parent_xwin, &root_x, &root_y);
 
-	/* geometry is relative to the parent surface origin. With SSD the
-	 * parent scene content may be shifted by -window_geometry; the
-	 * popup positioner already accounts for the surface coordinate
-	 * space, so place at geometry directly. */
-	wlr_scene_node_set_position(&pop->scene_tree->node, lx, ly);
+	int parent_ox = 0, parent_oy = 0;
+	if (!server->prefer_csd && parent->toplevel) {
+		struct wlr_box pgeo = parent->toplevel->base->current.geometry;
+		if (pgeo.width > 0 && pgeo.height > 0) {
+			parent_ox = pgeo.x;
+			parent_oy = pgeo.y;
+		}
+	}
+
+	int px = (int)root_x + wlx_scale_size(server, lx - parent_ox);
+	int py = (int)root_y + wlx_scale_size(server, ly - parent_oy);
+
+	/* Resize + move the shared stage to this popup (single-popup path).
+	 * Nested multi-popup can expand the stage later if needed. */
+	struct wlr_output *stage = server->popup_stage_output;
+	if (stage->width != pw || stage->height != ph) {
+		struct wlr_output_state state;
+		wlr_output_state_init(&state);
+		wlr_output_state_set_custom_mode(&state, pw, ph, 0);
+		wlr_output_commit_state(stage, &state);
+		wlr_output_state_finish(&state);
+	}
+
+	xcb_window_t xwin = wlr_x11_output_get_window(stage);
+	xcb_connection_t *xconn = wlr_x11_backend_get_connection(server->backend);
+	if (xwin != XCB_WINDOW_NONE && xconn) {
+		uint32_t vals[] = { (uint32_t)px, (uint32_t)py, (uint32_t)pw, (uint32_t)ph };
+		xcb_configure_window(xconn, xwin,
+			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+			XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
+		xcb_flush(xconn);
+	}
+	server->popup_stage_root_x = px;
+	server->popup_stage_root_y = py;
+
+	/* Scene: popup content at the stage's layout origin. */
+	if (server->popup_stage_l_output) {
+		wlr_scene_node_reparent(&pop->scene_tree->node, &server->scene->tree);
+		wlr_scene_node_set_position(&pop->scene_tree->node,
+			server->popup_stage_l_output->x,
+			server->popup_stage_l_output->y);
+	}
 	wlr_scene_node_set_enabled(&pop->scene_tree->node, true);
-
-	/* Keep xdg's subsurface offset at (0,0) — geometry already encodes it. */
 	struct wlr_scene_node *child;
 	wl_list_for_each(child, &pop->scene_tree->children, link) {
 		wlr_scene_node_set_position(child, 0, 0);
 	}
 
-	wlr_log(WLR_INFO, "xdg_popup place in parent scene at (%d,%d) size %dx%d",
-		lx, ly,
-		xdg->base->surface ? xdg->base->surface->current.width : 0,
-		xdg->base->surface ? xdg->base->surface->current.height : 0);
+	pop->output = stage; /* for hit-testing helpers */
 
-	if (parent->output) {
-		wlr_output_schedule_frame(parent->output);
-	}
+	wlr_log(WLR_INFO, "xdg_popup place on stage %dx%d at root (%d,%d) "
+		"(parent root %d,%d + geometry %d,%d)",
+		pw, ph, px, py, (int)root_x, (int)root_y, lx, ly);
+
+	wlr_output_schedule_frame(stage);
 }
 
 static void popup_map(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, map);
 	(void)data;
 	struct wlr_surface *surf = pop->xdg_popup->base->surface;
-	wlr_log(WLR_INFO, "xdg_popup map → parent scene (buffer %dx%d)",
+	wlr_log(WLR_INFO, "xdg_popup map → popup stage (buffer %dx%d)",
 		surf ? surf->current.width : 0,
 		surf ? surf->current.height : 0);
 	popup_position_and_map(pop);
@@ -555,9 +608,36 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, unmap);
 	(void)data;
 	wlr_log(WLR_INFO, "xdg_popup unmap");
-	popup_destroy_output(pop);
+	/* Shared stage is not destroyed — only detach this popup from it. */
+	if (pop->output == pop->server->popup_stage_output) {
+		pop->output = NULL;
+	} else {
+		popup_destroy_output(pop);
+	}
 	if (pop->scene_tree) {
 		wlr_scene_node_set_enabled(&pop->scene_tree->node, false);
+	}
+	/* Park stage off-screen when no popups remain mapped. */
+	bool any = false;
+	struct wlx_popup *p;
+	wl_list_for_each(p, &pop->server->popups, link) {
+		if (p != pop && p->xdg_popup &&
+				p->xdg_popup->base->surface->mapped) {
+			any = true;
+			break;
+		}
+	}
+	if (!any && pop->server->popup_stage_output) {
+		xcb_window_t xwin = wlr_x11_output_get_window(
+			pop->server->popup_stage_output);
+		xcb_connection_t *xconn =
+			wlr_x11_backend_get_connection(pop->server->backend);
+		if (xwin != XCB_WINDOW_NONE && xconn) {
+			uint32_t vals[] = { (uint32_t)-32000, (uint32_t)-32000 };
+			xcb_configure_window(xconn, xwin,
+				XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+			xcb_flush(xconn);
+		}
 	}
 }
 
@@ -643,7 +723,7 @@ static void setup_popup(struct wlx_server *server, struct wlr_xdg_popup *xdg_pop
 	pop->new_popup.notify = handle_new_xdg_popup;
 	wl_signal_add(&xdg_popup->base->events.new_popup, &pop->new_popup);
 
-	wlr_log(WLR_INFO, "new xdg_popup (parent scene on map)");
+	wlr_log(WLR_INFO, "new xdg_popup (shared stage on map)");
 }
 
 static void handle_new_xdg_popup(struct wl_listener *listener, void *data) {

@@ -88,6 +88,15 @@ struct wlx_server {
 	 * connect (foot, etc.) can start before any toplevel is mapped. */
 	struct wlr_output *bootstrap_output;
 	struct wlr_scene_output *bootstrap_scene_output;
+	/* Shared OR window for all xdg_popups (created at startup so mapping a
+	 * menu does not advertise a new wl_output — that made Qt destroy the
+	 * popup immediately). Repositioned/resized per popup. */
+	struct wlr_output *popup_stage_output;
+	struct wlr_output_layout_output *popup_stage_l_output;
+	struct wlr_scene_output *popup_stage_scene_output;
+	struct wl_listener popup_stage_frame;
+	int popup_stage_root_x;
+	int popup_stage_root_y;
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
