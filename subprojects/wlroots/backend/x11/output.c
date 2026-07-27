@@ -355,8 +355,13 @@ static bool output_commit_buffer(struct wlr_x11_output *output,
 		goto error;
 	}
 
+	/* Depth-32 ARGB windows are composited by the host WM. Partial Present
+	 * leaves previous pixels outside the damage region (ghosted shadows,
+	 * popup trails, maximized frame lingering as the "background"). Always
+	 * present the full pixmap when the buffer has an alpha channel. */
 	xcb_xfixes_region_t region = XCB_NONE;
-	if (state->committed & WLR_OUTPUT_STATE_DAMAGE) {
+	bool buffer_opaque = wlr_buffer_is_opaque(buffer);
+	if (buffer_opaque && (state->committed & WLR_OUTPUT_STATE_DAMAGE)) {
 		pixman_region32_union(&output->exposed, &output->exposed, &state->damage);
 
 		int rects_len = 0;

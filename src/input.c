@@ -25,10 +25,12 @@ struct wlr_surface *surface_at_cursor(struct wlx_server *server,
 	if (!scene_surface) {
 		return NULL;
 	}
+	struct wlr_surface *surface = scene_surface->surface;
+
 	/* With --scale, dest rectangles are enlarged; node_at returns coords in
 	 * that scaled dest space. Clients expect surface-local (logical) coords. */
 	wlx_pointer_to_surface(server, sx, sy);
-	return scene_surface->surface;
+	return surface;
 }
 
 /* Returns true if enough time has passed since the last actual

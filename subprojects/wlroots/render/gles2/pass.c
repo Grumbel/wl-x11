@@ -264,8 +264,11 @@ static void render_pass_add_rect(struct wlr_render_pass *wlr_pass,
 	wlr_render_rect_options_get_box(options, wlr_buffer, &box);
 
 	push_gles2_debug(renderer);
+	/* a == 1 → replace with opaque color. a == 0 (transparent clear) must
+	 * also replace: premul blend of (0,0,0,0) leaves dst unchanged. */
 	enum wlr_render_blend_mode blend_mode =
-		color->a == 1.0 ? WLR_RENDER_BLEND_MODE_NONE : options->blend_mode;
+		(color->a == 1.0 || color->a == 0.0) ?
+			WLR_RENDER_BLEND_MODE_NONE : options->blend_mode;
 	if (blend_mode == WLR_RENDER_BLEND_MODE_NONE &&
 			options->clip == NULL &&
 			box.x == 0 && box.y == 0 &&

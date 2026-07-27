@@ -91,56 +91,16 @@ void wlx_apply_content_scale(struct wlx_window *win) {
 	scene_node_apply_scale(&win->scene_tree->node, scale);
 }
 
-/* Stretch every surface buffer under node to fill the output so a resize
- * still shows the last client content instead of a transparent hole. */
-static void scene_node_stretch_to(struct wlr_scene_node *node,
-		int out_w, int out_h) {
-	if (!node || !node->enabled) {
-		return;
-	}
-	if (node->type == WLR_SCENE_NODE_BUFFER) {
-		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(node);
-		struct wlr_scene_surface *ss = wlr_scene_surface_try_from_buffer(sb);
-		if (ss && ss->surface &&
-				ss->surface->current.width > 0 &&
-				ss->surface->current.height > 0) {
-			wlr_scene_buffer_set_dest_size(sb, out_w, out_h);
-			wlr_scene_node_set_position(node, 0, 0);
-		}
-		return;
-	}
-	if (node->type == WLR_SCENE_NODE_TREE) {
-		struct wlr_scene_tree *tree = wlr_scene_tree_from_node(node);
-		struct wlr_scene_node *child;
-		wl_list_for_each(child, &tree->children, link) {
-			scene_node_stretch_to(child, out_w, out_h);
-		}
-	}
-}
-
-static void paint_hold_frame(struct wlx_window *win) {
-	if (!win || !win->scene_output || !win->output || !win->scene_tree) {
-		return;
-	}
-	scene_node_stretch_to(&win->scene_tree->node,
-		win->output->width, win->output->height);
-	wlr_scene_output_commit(win->scene_output, NULL);
-}
-
 void output_frame(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_frame);
 	if (!win->scene_output || !win->output) {
 		return;
 	}
 
-	/* After a host resize the X window is already the new size and often
-	 * cleared. Stretch the last client buffer to fill until the client
-	 * commits a matching frame. */
-	if (win->hold_present) {
-		paint_hold_frame(win);
-	} else {
-		wlr_scene_output_commit(win->scene_output, NULL);
-	}
+	/* Always present at the client's native buffer size (no stretch). During
+	 * hold_present the last buffer is letterboxed on a transparent clear so
+	 * resize does not flash fully empty, without scaling drop-shadows. */
+	wlr_scene_output_commit(win->scene_output, NULL);
 
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
@@ -170,26 +130,37 @@ void output_commit(struct wl_listener *listener, void *data) {
 	win->last_output_width = w;
 	win->last_output_height = h;
 	if (had_frame) {
-		/* Paint a stretched copy of the last client buffer *now*, in the
-		 * same handler as the size change. Waiting for the next frame
-		 * event leaves a blank gap after the host clears the ARGB window. */
+		/* Paint immediately with the last client buffer at native size
+		 * (letterboxed). Stretching filled the hole but corrupted ARGB
+		 * shadows; skipping paint left a fully transparent flash. */
 		win->hold_present = true;
-		paint_hold_frame(win);
+		if (win->scene_output) {
+			wlr_scene_output_commit(win->scene_output, NULL);
+		}
+	} else {
+		win->hold_present = false;
+		wlr_output_schedule_frame(win->output);
 	}
 
 	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
 		/* Client sees logical window geometry; host may be larger by CSD
-		 * shadow margin. Maximized/fullscreen clients drop the shadow, so
-		 * do not subtract a stale margin or the buffer undersizes the X
-		 * window and pointer hits drift. */
+		 * shadow margin. Maximized/fullscreen drop the shadow — never
+		 * subtract a stale margin or the client undersizes the X window
+		 * (empty right/bottom border). Host resize often races ahead of
+		 * _NET_WM_STATE; also treat size_from_wm + zero margins as tiled. */
 		int lw = wlx_unscale_size(win->server, w);
 		int lh = wlx_unscale_size(win->server, h);
 		bool tiled = win->toplevel->current.maximized ||
 			win->toplevel->pending.maximized ||
 			win->toplevel->current.fullscreen ||
 			win->toplevel->pending.fullscreen;
-		if (win->server->prefer_csd && !tiled) {
+		/* After maximize the property handler clears margins; a resize that
+		 * already ran with old margins is fixed by that handler re-sending
+		 * size. While margins are still non-zero, only skip subtract if the
+		 * xdg state already knows we are tiled. */
+		if (win->server->prefer_csd && !tiled &&
+				(win->csd_margin_w > 0 || win->csd_margin_h > 0)) {
 			lw -= win->csd_margin_w;
 			lh -= win->csd_margin_h;
 			if (lw < 1) {
@@ -553,6 +524,24 @@ bool pointer_coords_on_window(struct wlx_server *server,
 	*sx = (double)tr->dst_x;
 	*sy = (double)tr->dst_y;
 	free(tr);
+
+	/* X11 content window top-left is the window-geometry origin for SSD
+	 * hosts (window sized to geometry). Surface-local coords include any
+	 * CSD/shadow offset inside the buffer: surface = window + geometry.xy.
+	 * With --csd the host is buffer-sized and the scene is forced to
+	 * (0,0), so window coords already match the surface. Same when
+	 * maximized/fullscreen (no shadow; geometry origin is 0,0). */
+	bool tiled = win->toplevel->current.maximized ||
+		win->toplevel->pending.maximized ||
+		win->toplevel->current.fullscreen ||
+		win->toplevel->pending.fullscreen;
+	if (!server->prefer_csd && !tiled) {
+		struct wlr_box geo = win->toplevel->base->current.geometry;
+		if (geo.width > 0 && geo.height > 0) {
+			*sx += (double)geo.x;
+			*sy += (double)geo.y;
+		}
+	}
 	return true;
 }
 

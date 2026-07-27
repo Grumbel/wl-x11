@@ -120,8 +120,11 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	}
 
 	/* Fit the X11 window to the client until the WM/user resizes it.
-	 * SSD: xdg geometry. CSD: full buffer (shadow/resize margins). */
-	if (win->output && !win->size_from_wm && win->toplevel) {
+	 * SSD: xdg geometry. CSD: full buffer (shadow/resize margins).
+	 * After unmaximize, size_from_wm is cleared so shadows can expand the
+	 * host again. While size_from_wm (user/WM resize), still grow for CSD
+	 * if the client buffer is larger than the host (shadows would clip). */
+	if (win->output && win->toplevel) {
 		int cw = 0, ch = 0;
 		toplevel_preferred_size(win, &cw, &ch);
 		struct wlr_box geo = win->toplevel->base->current.geometry;
@@ -129,8 +132,24 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		int conf_h = (geo.height > 0) ? geo.height : ch;
 		int out_w = wlx_scale_size(win->server, cw);
 		int out_h = wlx_scale_size(win->server, ch);
+		bool tiled = win->toplevel->current.maximized ||
+			win->toplevel->pending.maximized ||
+			win->toplevel->current.fullscreen ||
+			win->toplevel->pending.fullscreen;
+		bool grow_csd = win->server->prefer_csd && !tiled &&
+			(out_w > win->output->width || out_h > win->output->height);
+		bool fit = !win->size_from_wm &&
+			(out_w != win->output->width || out_h != win->output->height);
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
-				(out_w != win->output->width || out_h != win->output->height)) {
+				(fit || grow_csd)) {
+			if (grow_csd && win->size_from_wm) {
+				if (out_w < win->output->width) {
+					out_w = win->output->width;
+				}
+				if (out_h < win->output->height) {
+					out_h = win->output->height;
+				}
+			}
 			wlr_log(WLR_INFO, "fitting X11 window to client %dx%d "
 				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
 				cw, ch, conf_w, conf_h,
@@ -149,9 +168,15 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	 * -geometry.y) so geometry sits at the node origin. Correct for
 	 * geometry-sized SSD hosts. With --csd the host is buffer-sized
 	 * (shadow included); force (0,0) so content/damage match the X11
-	 * window. Scene's commit listener is registered first and runs
-	 * before this one. */
-	if (win->server->prefer_csd && win->scene_tree) {
+	 * window. Maximized/fullscreen clients drop shadow offsets — also
+	 * force (0,0) so a residual geometry origin does not shift hit-tests.
+	 * Scene's commit listener is registered first and runs before this. */
+	bool tiled = win->toplevel &&
+		(win->toplevel->current.maximized ||
+		 win->toplevel->pending.maximized ||
+		 win->toplevel->current.fullscreen ||
+		 win->toplevel->pending.fullscreen);
+	if ((win->server->prefer_csd || tiled) && win->scene_tree) {
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &win->scene_tree->children, link) {
 			wlr_scene_node_set_position(child, 0, 0);

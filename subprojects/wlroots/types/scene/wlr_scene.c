@@ -2508,52 +2508,65 @@ bool wlr_scene_output_build_state(struct wlr_scene_output *scene_output,
 	wlr_damage_ring_rotate_buffer(&scene_output->damage_ring, buffer,
 		&render_data.damage);
 
-	pixman_region32_t background;
-	pixman_region32_init(&background);
-	pixman_region32_copy(&background, &render_data.damage);
-
-	// Cull areas of the background that are occluded by opaque regions of
-	// scene nodes above. Those scene nodes will just render atop having us
-	// never see the background.
-	if (scene_output->scene->calculate_visibility) {
-		for (int i = list_len - 1; i >= 0; i--) {
-			struct render_list_entry *entry = &list_data[i];
-
-			// We must only cull opaque regions that are visible by the node.
-			// The node's visibility will have the knowledge of a black rect
-			// that may have been omitted from the render list via the black
-			// rect optimization. In order to ensure we don't cull background
-			// rendering in that black rect region, consider the node's visibility.
-			pixman_region32_t opaque;
-			pixman_region32_init(&opaque);
-			scene_node_opaque_region(entry->node, entry->x, entry->y, &opaque);
-			pixman_region32_intersect(&opaque, &opaque, &entry->node->visible);
-
-			pixman_region32_translate(&opaque, -scene_output->x, -scene_output->y);
-			logical_to_buffer_coords(&opaque, &render_data, false);
-			pixman_region32_subtract(&background, &background, &opaque);
-			pixman_region32_fini(&opaque);
-		}
-
-		if (floor(render_data.scale) != render_data.scale) {
-			wlr_region_expand(&background, &background, 1);
-
-			// reintersect with the damage because we never want to render
-			// outside of the damage region
-			pixman_region32_intersect(&background, &background, &render_data.damage);
-		}
-	}
-
-	/* Transparent clear when the output buffer has an alpha channel so
-	 * host ARGB windows can composite over the desktop. Opaque black
-	 * otherwise (depth-24 / XRGB backends). */
+	/* ARGB / host-composited outputs: partial damage leaves old pixels in
+	 * both the GL buffer and the X11 window (Present region). Force a full
+	 * redraw + transparent clear every frame so drop-shadows and popups do
+	 * not accumulate or show a scaled previous size as the background. */
 	bool has_alpha = !wlr_buffer_is_opaque(buffer);
-	wlr_render_pass_add_rect(render_pass, &(struct wlr_render_rect_options){
-		.box = { .width = buffer->width, .height = buffer->height },
-		.color = { .r = 0, .g = 0, .b = 0, .a = has_alpha ? 0.f : 1.f },
-		.clip = &background,
-	});
-	pixman_region32_fini(&background);
+	if (has_alpha) {
+		pixman_region32_fini(&render_data.damage);
+		pixman_region32_init_rect(&render_data.damage,
+			0, 0, buffer->width, buffer->height);
+		wlr_render_pass_add_rect(render_pass, &(struct wlr_render_rect_options){
+			.box = { .width = buffer->width, .height = buffer->height },
+			.color = { .r = 0, .g = 0, .b = 0, .a = 0.f },
+			.blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+		});
+	} else {
+		pixman_region32_t background;
+		pixman_region32_init(&background);
+		pixman_region32_copy(&background, &render_data.damage);
+
+		// Cull areas of the background that are occluded by opaque regions of
+		// scene nodes above. Those scene nodes will just render atop having us
+		// never see the background.
+		if (scene_output->scene->calculate_visibility) {
+			for (int i = list_len - 1; i >= 0; i--) {
+				struct render_list_entry *entry = &list_data[i];
+
+				// We must only cull opaque regions that are visible by the node.
+				// The node's visibility will have the knowledge of a black rect
+				// that may have been omitted from the render list via the black
+				// rect optimization. In order to ensure we don't cull background
+				// rendering in that black rect region, consider the node's visibility.
+				pixman_region32_t opaque;
+				pixman_region32_init(&opaque);
+				scene_node_opaque_region(entry->node, entry->x, entry->y, &opaque);
+				pixman_region32_intersect(&opaque, &opaque, &entry->node->visible);
+
+				pixman_region32_translate(&opaque, -scene_output->x, -scene_output->y);
+				logical_to_buffer_coords(&opaque, &render_data, false);
+				pixman_region32_subtract(&background, &background, &opaque);
+				pixman_region32_fini(&opaque);
+			}
+
+			if (floor(render_data.scale) != render_data.scale) {
+				wlr_region_expand(&background, &background, 1);
+
+				// reintersect with the damage because we never want to render
+				// outside of the damage region
+				pixman_region32_intersect(&background, &background, &render_data.damage);
+			}
+		}
+
+		wlr_render_pass_add_rect(render_pass, &(struct wlr_render_rect_options){
+			.box = { .width = buffer->width, .height = buffer->height },
+			.color = { .r = 0, .g = 0, .b = 0, .a = 1.f },
+			.clip = &background,
+			.blend_mode = WLR_RENDER_BLEND_MODE_NONE,
+		});
+		pixman_region32_fini(&background);
+	}
 
 	for (int i = list_len - 1; i >= 0; i--) {
 		struct render_list_entry *entry = &list_data[i];

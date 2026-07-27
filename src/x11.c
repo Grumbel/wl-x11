@@ -329,24 +329,40 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 	if (maximized != cur_max) {
 		wlr_log(WLR_INFO, "host _NET_WM_STATE maximized=%d → xdg_toplevel",
 			maximized);
-		win->size_from_wm = true;
 		/* CSD drop-shadow goes away when maximized; clear so a concurrent
 		 * host resize does not subtract the old margin from the configure. */
 		if (maximized) {
+			win->size_from_wm = true;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
+		} else {
+			/* Allow surface_commit to grow the host for restored CSD
+			 * shadows (otherwise buffer is clipped at right/bottom). */
+			win->size_from_wm = false;
 		}
 		wlr_xdg_toplevel_set_maximized(win->toplevel, maximized);
 	}
 	if (fullscreen != cur_fs) {
 		wlr_log(WLR_INFO, "host _NET_WM_STATE fullscreen=%d → xdg_toplevel",
 			fullscreen);
-		win->size_from_wm = true;
 		if (fullscreen) {
+			win->size_from_wm = true;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
+		} else {
+			win->size_from_wm = false;
 		}
 		wlr_xdg_toplevel_set_fullscreen(win->toplevel, fullscreen);
+	}
+
+	/* Resize often arrives before this property notify. Re-send the current
+	 * host size without CSD margins so the client fills the maximized
+	 * window (avoids empty right/bottom border). */
+	if ((maximized || fullscreen) && win->output && win->output->width > 0 &&
+			win->output->height > 0) {
+		int lw = wlx_unscale_size(server, win->output->width);
+		int lh = wlx_unscale_size(server, win->output->height);
+		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
 	}
 }
 
@@ -484,6 +500,9 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	/* Host WM or user resized the X11 window — stop auto-fitting to
 	 * client geometry on subsequent commits. */
 	win->size_from_wm = true;
+	/* Sync maximized/fullscreen from X before applying the size so
+	 * output_commit does not subtract CSD margins on a maximize resize. */
+	win_handle_net_wm_state_notify(win->server, win);
 	/* output_commit() fires synchronously as part of this call and
 	 * handles diffing the new size against what we last told the
 	 * toplevel and forwarding it if different. Schedule a frame so the
