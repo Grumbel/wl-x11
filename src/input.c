@@ -159,8 +159,24 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 	 * while X11 windows are independently placed on the host desktop. */
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = NULL;
-	struct wlx_window *under = window_at_root_pointer(server);
-	if (under && under->toplevel &&
+
+	/* Popups are OR windows not tracked as wlx_window — check first. */
+	struct wlx_popup *pop_under = popup_at_root_pointer(server);
+	if (pop_under && pop_under->xdg_popup && pop_under->output) {
+		int16_t px = 0, py = 0, ox = 0, oy = 0;
+		xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
+		if (query_root_pointer_position(server, &px, &py) &&
+				xwin != XCB_WINDOW_NONE &&
+				query_window_root_position(server, xwin, &ox, &oy)) {
+			sx = (double)(px - ox);
+			sy = (double)(py - oy);
+			wlx_pointer_to_surface(server, &sx, &sy);
+			surface = pop_under->xdg_popup->base->surface;
+		}
+	}
+
+	struct wlx_window *under = surface ? NULL : window_at_root_pointer(server);
+	if (!surface && under && under->toplevel &&
 			pointer_coords_on_window(server, under, &sx, &sy)) {
 		wlx_pointer_to_surface(server, &sx, &sy);
 		if (under->scene_tree) {
@@ -182,7 +198,8 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		if (!surface) {
 			surface = under->toplevel->base->surface;
 		}
-	} else {
+	}
+	if (!surface) {
 		surface = surface_at_cursor(server, &sx, &sy);
 	}
 
@@ -262,14 +279,26 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlr_pointer_button_event *event = data;
 
 	if ((uint32_t)event->state == (uint32_t)WLR_BUTTON_PRESSED) {
-		/* Prefer the real X11 window under the pointer. Scene hit-testing
-		 * alone activates the parent when the layout cursor has not yet
-		 * moved onto the dialog's output slot. */
-		struct wlx_window *win = window_at_root_pointer(server);
 		double sx = 0, sy = 0;
 		struct wlr_surface *surface = NULL;
 
-		if (win && win->toplevel &&
+		struct wlx_popup *pop_under = popup_at_root_pointer(server);
+		if (pop_under && pop_under->xdg_popup && pop_under->output) {
+			int16_t px = 0, py = 0, ox = 0, oy = 0;
+			xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
+			if (query_root_pointer_position(server, &px, &py) &&
+					xwin != XCB_WINDOW_NONE &&
+					query_window_root_position(server, xwin, &ox, &oy)) {
+				sx = (double)(px - ox);
+				sy = (double)(py - oy);
+				wlx_pointer_to_surface(server, &sx, &sy);
+				surface = pop_under->xdg_popup->base->surface;
+				wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+			}
+		}
+
+		struct wlx_window *win = surface ? NULL : window_at_root_pointer(server);
+		if (!surface && win && win->toplevel &&
 				pointer_coords_on_window(server, win, &sx, &sy)) {
 			wlx_pointer_to_surface(server, &sx, &sy);
 			/* Hit-test within this window so subsurfaces get the button
@@ -295,7 +324,8 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 			}
 			set_active_window(server, win);
 			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-		} else {
+		}
+		if (!surface) {
 			surface = surface_at_cursor(server, &sx, &sy);
 			if (surface) {
 				struct wlx_window *from_scene = window_from_surface(surface);

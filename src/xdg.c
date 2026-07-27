@@ -394,6 +394,37 @@ static void popup_destroy_output(struct wlx_popup *pop) {
 	/* output_destroy listener clears fields */
 }
 
+
+struct wlx_popup *popup_at_root_pointer(struct wlx_server *server) {
+	if (!server->xcb || xcb_connection_has_error(server->xcb)) {
+		return NULL;
+	}
+	int16_t px = 0, py = 0;
+	if (!query_root_pointer_position(server, &px, &py)) {
+		return NULL;
+	}
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &server->popups, link) {
+		if (!pop->output) {
+			continue;
+		}
+		xcb_window_t xwin = wlr_x11_output_get_window(pop->output);
+		if (xwin == XCB_WINDOW_NONE) {
+			continue;
+		}
+		int16_t ox = 0, oy = 0;
+		if (!query_window_root_position(server, xwin, &ox, &oy)) {
+			continue;
+		}
+		int w = pop->output->width;
+		int h = pop->output->height;
+		if (px >= ox && py >= oy && px < ox + w && py < oy + h) {
+			return pop;
+		}
+	}
+	return NULL;
+}
+
 static void popup_position_and_map(struct wlx_popup *pop) {
 	struct wlx_window *parent = pop->parent;
 	if (!parent || !parent->output || parent->xwin == XCB_WINDOW_NONE) {
@@ -456,35 +487,44 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 		wlr_output_state_finish(&state);
 	}
 
-	/* Parent content top-left in root coordinates. */
-	xcb_window_t parent_xwin = parent->content_xwin != XCB_WINDOW_NONE
-		? parent->content_xwin : parent->xwin;
+	/* popup->current.geometry is relative to the parent *surface* origin.
+	 * Our host windows are buffer-sized with scene at (0,0), so that is
+	 * also the X11 content-window origin. Using get_toplevel_coords(0,0)
+	 * only returned the parent window-geometry inset (~26,23) — every
+	 * menu appeared at the parent's top-left. */
+	int lx = xdg->current.geometry.x;
+	int ly = xdg->current.geometry.y;
+	if (lx == 0 && ly == 0 &&
+			(xdg->scheduled.geometry.x != 0 || xdg->scheduled.geometry.y != 0)) {
+		/* First map before the committed geometry is updated. */
+		lx = xdg->scheduled.geometry.x;
+		ly = xdg->scheduled.geometry.y;
+	}
+
+	/* Anchor: immediate parent surface's X11 window (toplevel content or
+	 * another popup's OR window for nested menus). */
 	int16_t root_x = 0, root_y = 0;
-	query_window_root_position(pop->server, parent_xwin, &root_x, &root_y);
-
-	/* Popup position relative to the parent's *window geometry* origin
-	 * (xdg-shell). With CSD the surface includes shadow; geometry offset
-	 * is applied by the scene helper — for placement use toplevel coords. */
-	int lx = 0, ly = 0;
-	wlr_xdg_popup_get_toplevel_coords(xdg, 0, 0, &lx, &ly);
-
-	/* Parent X window is buffer-sized when the client draws CSD; geometry
-	 * origin is inset — shift popup placement by the geometry offset. */
-	if (parent->toplevel &&
-			(parent->server->prefer_csd ||
-			 parent->csd_margin_w > 0 || parent->csd_margin_h > 0)) {
-		struct wlr_box geo = parent->toplevel->base->current.geometry;
-		if (geo.width > 0) {
-			lx += geo.x;
-			ly += geo.y;
+	xcb_window_t parent_xwin = XCB_WINDOW_NONE;
+	struct wlr_xdg_surface *parent_xdg =
+		wlr_xdg_surface_try_from_wlr_surface(xdg->parent);
+	if (parent_xdg && parent_xdg->role == WLR_XDG_SURFACE_ROLE_POPUP &&
+			parent_xdg->popup && parent_xdg->data) {
+		struct wlx_popup *parent_pop = parent_xdg->data;
+		if (parent_pop->output) {
+			parent_xwin = wlr_x11_output_get_window(parent_pop->output);
 		}
 	}
+	if (parent_xwin == XCB_WINDOW_NONE) {
+		parent_xwin = parent->content_xwin != XCB_WINDOW_NONE
+			? parent->content_xwin : parent->xwin;
+	}
+	query_window_root_position(pop->server, parent_xwin, &root_x, &root_y);
 
 	int px = (int)root_x + wlx_scale_size(pop->server, lx);
 	int py = (int)root_y + wlx_scale_size(pop->server, ly);
 
 	wlr_log(WLR_INFO, "xdg_popup place %dx%d at root (%d,%d) "
-		"(parent root %d,%d + local %d,%d)",
+		"(parent root %d,%d + geometry %d,%d)",
 		pw, ph, px, py, (int)root_x, (int)root_y, lx, ly);
 
 	xcb_window_t xwin = wlr_x11_output_get_window(pop->output);
@@ -563,6 +603,7 @@ static void popup_destroy(struct wl_listener *listener, void *data) {
 		wlr_scene_node_destroy(&pop->scene_tree->node);
 		pop->scene_tree = NULL;
 	}
+	wl_list_remove(&pop->link);
 	wl_list_remove(&pop->map.link);
 	wl_list_remove(&pop->unmap.link);
 	wl_list_remove(&pop->destroy.link);
@@ -585,6 +626,7 @@ static void setup_popup(struct wlx_server *server, struct wlr_xdg_popup *xdg_pop
 	pop->parent = parent;
 	pop->xdg_popup = xdg_popup;
 	xdg_popup->base->data = pop;
+	wl_list_insert(&server->popups, &pop->link);
 
 	pop->scene_tree = wlr_scene_xdg_surface_create(&server->scene->tree,
 		xdg_popup->base);

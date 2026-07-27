@@ -116,7 +116,8 @@ struct wlx_server {
 	struct wl_listener request_start_drag;
 	struct wl_listener start_drag;
 
-	struct wl_list windows; /* wlx_window::link */
+	struct wl_list windows;
+	struct wl_list popups; /* wlx_popup.link */ /* wlx_window::link */
 	struct wlx_window *focused_window;
 
 	/* Self-driven interactive move/resize state.
@@ -329,6 +330,7 @@ struct wlx_popup {
 	struct wlx_server *server;
 	struct wlx_window *parent;
 	struct wlr_xdg_popup *xdg_popup;
+	struct wl_list link; /* server->popups */
 	struct wlr_scene_tree *scene_tree;
 	struct wlr_output *output;
 	struct wlr_output_layout_output *l_output;
@@ -371,6 +373,7 @@ bool query_root_pointer_position(struct wlx_server *s, int16_t *x, int16_t *y);
 struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w);
 struct wlx_window *window_from_surface(struct wlr_surface *surface);
 struct wlx_window *window_at_root_pointer(struct wlx_server *server);
+struct wlx_popup *popup_at_root_pointer(struct wlx_server *server);
 bool pointer_coords_on_window(struct wlx_server *server, struct wlx_window *win, double *sx, double *sy);
 void select_window_events(struct wlx_server *server, xcb_window_t w);
 void register_x11_window_subtree(struct wlx_window *win, xcb_window_t w);

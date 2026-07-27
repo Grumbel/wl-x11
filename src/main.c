@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
 		wlr_scene_attach_output_layout(server.scene, server.output_layout);
 
 	wl_list_init(&server.windows);
+	wl_list_init(&server.popups);
 
 	/* Version ≥ 5 for xdg_toplevel.wm_capabilities (GTK/libadwaita CSD). */
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 5);
