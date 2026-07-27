@@ -560,10 +560,21 @@ void create_output_for_window(struct wlx_window *win) {
 	memset(win->related, 0, sizeof(win->related));
 	win->size_from_wm = false;
 
-	struct wlr_output *output = wlr_x11_output_create(server->backend);
+	/* Transient dialogs: host WMs ignore Motif and reparent into a frame,
+	 * shrinking the client area and clipping CSD/buffer (e.g. 569x203 →
+	 * ~569x176). Override-redirect skips the WM entirely — same path as
+	 * xdg_popup menus, which never clip. Main windows stay managed. */
+	bool is_transient = win->toplevel && win->toplevel->parent != NULL;
+	struct wlr_output *output = is_transient
+		? wlr_x11_output_create_override_redirect(server->backend)
+		: wlr_x11_output_create(server->backend);
 	if (!output) {
 		wlr_log(WLR_ERROR, "failed to create X11 output for new toplevel");
 		return;
+	}
+	if (is_transient) {
+		wlr_log(WLR_INFO, "transient toplevel → override-redirect X11 window "
+			"(avoid host frame clipping)");
 	}
 	win->output = output;
 	output->data = win;
@@ -654,6 +665,35 @@ void create_output_for_window(struct wlx_window *win) {
 		output->width, output->height);
 	win->last_output_width = output->width;
 	win->last_output_height = output->height;
+
+	/* OR dialogs need an explicit root position (no WM placement). */
+	if (is_transient && win->xwin != XCB_WINDOW_NONE && server->xcb) {
+		struct wlx_window *parent_win = NULL;
+		if (win->toplevel->parent && win->toplevel->parent->base) {
+			parent_win = win->toplevel->parent->base->data;
+		}
+		int16_t px = 100, py = 100;
+		if (parent_win) {
+			xcb_window_t pw = parent_win->content_xwin != XCB_WINDOW_NONE
+				? parent_win->content_xwin : parent_win->xwin;
+			int16_t ox = 0, oy = 0;
+			query_window_root_position(server, pw, &ox, &oy);
+			int pw_w = parent_win->output ? parent_win->output->width : 800;
+			int pw_h = parent_win->output ? parent_win->output->height : 600;
+			px = ox + (int16_t)((pw_w - output->width) / 2);
+			py = oy + (int16_t)((pw_h - output->height) / 2);
+			if (px < 0) {
+				px = 0;
+			}
+			if (py < 0) {
+				py = 0;
+			}
+		}
+		uint32_t vals[] = { (uint32_t)px, (uint32_t)py };
+		xcb_configure_window(server->xcb, win->xwin,
+			XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+		xcb_flush(server->xcb);
+	}
 
 	win->l_output = wlr_output_layout_add_auto(server->output_layout, output);
 	win->scene_output = wlr_scene_output_create(server->scene, output);

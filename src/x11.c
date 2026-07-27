@@ -647,6 +647,48 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 					xwin_set_motif_decorations(server,
 						win->content_xwin, false);
 				}
+				/* Host WM often ignores Motif and still wraps us in a
+				 * frame, shrinking the client area (e.g. 531x203 → ~531x176
+				 * for a titlebar). Present then draws into a smaller
+				 * drawable and the bottom/right of the buffer is clipped.
+				 * Re-assert the buffer size on the content window, and if
+				 * the geometry still disagrees, shrink our output to the
+				 * real drawable so we stop presenting off the edge. */
+				if (win->output && win->content_xwin != XCB_WINDOW_NONE &&
+						server->xcb) {
+					int want_w = win->output->width;
+					int want_h = win->output->height;
+					if (want_w > 0 && want_h > 0) {
+						uint32_t vals[] = { (uint32_t)want_w, (uint32_t)want_h };
+						xcb_configure_window(server->xcb, win->content_xwin,
+							XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+							vals);
+						xcb_flush(server->xcb);
+					}
+					xcb_get_geometry_cookie_t gc =
+						xcb_get_geometry(server->xcb, win->content_xwin);
+					xcb_get_geometry_reply_t *gr =
+						xcb_get_geometry_reply(server->xcb, gc, NULL);
+					if (gr) {
+						int cw = gr->width, ch = gr->height;
+						free(gr);
+						if (cw > 0 && ch > 0 &&
+								(cw != win->output->width ||
+								 ch != win->output->height)) {
+							wlr_log(WLR_INFO,
+								"content window 0x%x is %dx%d after reparent "
+								"(output %dx%d) — syncing output to drawable",
+								win->content_xwin, cw, ch,
+								win->output->width, win->output->height);
+							resize_output_to(win, cw, ch);
+							if (win->toplevel) {
+								wlr_xdg_toplevel_set_size(win->toplevel,
+									wlx_unscale_size(server, cw),
+									wlx_unscale_size(server, ch));
+							}
+						}
+					}
+				}
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
 			/* Learn the WM's systematic position discrepancy from real
