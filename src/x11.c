@@ -705,6 +705,14 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				}
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {
+			xcb_configure_notify_event_t *cn_all =
+				(xcb_configure_notify_event_t *)event;
+			struct wlx_window *cfg_win =
+				window_from_xwin(server, cn_all->window);
+			if (cfg_win) {
+				/* Popup stage is OR in root coords — follow parent moves. */
+				wlx_reposition_popups_for_window(cfg_win);
+			}
 			/* Learn the WM's systematic position discrepancy from real
 			 * feedback (see the comment on struct wlx_server's
 			 * drag_correction_x field) rather than assuming a fixed

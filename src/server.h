@@ -141,10 +141,9 @@ struct wlx_server {
 	 * process the matching press, create an xdg_popup and take a grab
 	 * before the release is delivered. Otherwise Qt treats the release
 	 * as "click outside" and destroys the menu in the same frame. */
-	struct wl_event_source *deferred_release_source;
-	uint32_t deferred_release_time;
-	uint32_t deferred_release_button;
-	bool deferred_release_pending;
+	/* Drop the release of the click that opened an xdg_popup so Qt
+	 * does not treat it as click-outside on the parent. */
+	bool swallow_next_pointer_release;
 
 	/* Self-driven interactive move/resize state.
 	 *
@@ -497,6 +496,10 @@ int wlx_scale_size(struct wlx_server *server, int logical);
 int wlx_unscale_size(struct wlx_server *server, int output_px);
 void wlx_apply_content_scale(struct wlx_window *win);
 void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy);
+/* Re-resolve pointer focus from the real X11 pointer (after popup map/unmap). */
+void wlx_pointer_refresh_focus(struct wlx_server *server);
+/* Re-place mapped popups after their parent X11 window moved. */
+void wlx_reposition_popups_for_window(struct wlx_window *win);
 
 #endif /* WLX_SERVER_H */
 

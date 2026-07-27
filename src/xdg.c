@@ -605,6 +605,19 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	wlr_output_schedule_frame(stage);
 }
 
+void wlx_reposition_popups_for_window(struct wlx_window *win) {
+	if (!win || !win->server) {
+		return;
+	}
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &win->server->popups, link) {
+		if (pop->parent == win && pop->xdg_popup &&
+				pop->xdg_popup->base->surface->mapped) {
+			popup_position_and_map(pop);
+		}
+	}
+}
+
 static void popup_map(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, map);
 	(void)data;
@@ -613,19 +626,29 @@ static void popup_map(struct wl_listener *listener, void *data) {
 		surf ? surf->current.width : 0,
 		surf ? surf->current.height : 0);
 	popup_position_and_map(pop);
+	/* Opening click is still held: mark its release to be handled without
+	 * dismissing the popup, and do not enter yet (would reset_buttons). */
+	if (pop->server->seat &&
+			pop->server->seat->pointer_state.button_count > 0) {
+		pop->server->swallow_next_pointer_release = true;
+	} else {
+		wlx_pointer_refresh_focus(pop->server);
+	}
 }
 
 static void popup_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, unmap);
 	(void)data;
 	wlr_log(WLR_INFO, "xdg_popup unmap");
-	/* Drop seat focus if it still points at this popup — otherwise the next
-	 * open can leave motion/button serials stuck on a destroyed surface. */
+	/* Drop seat focus if it still points at this popup, then re-enter
+	 * whatever is under the pointer (usually the parent). Leaving focus
+	 * on a destroyed surface made the next combo open miss mouse input. */
 	if (pop->xdg_popup && pop->server->seat &&
 			pop->server->seat->pointer_state.focused_surface ==
 				pop->xdg_popup->base->surface) {
 		wlr_seat_pointer_clear_focus(pop->server->seat);
 	}
+	wlx_pointer_refresh_focus(pop->server);
 	/* Shared stage is not destroyed — only detach this popup from it. */
 	if (pop->output == pop->server->popup_stage_output) {
 		pop->output = NULL;

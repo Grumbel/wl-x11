@@ -238,16 +238,25 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		return;
 	}
 
+	/* notify_enter resets seat buttons when the focused surface changes.
+	 * Never switch focus while a button is held — that made the opening
+	 * combo/menu click require a second press and blocked hover until
+	 * focus finally landed on the popup after a clean enter. */
+	if (server->seat->pointer_state.button_count > 0) {
+		if (prev) {
+			/* Keep motion on the pressed surface; coords may be off if the
+			 * pointer left it — still better than reset_buttons mid-click. */
+			wlr_seat_pointer_notify_motion(server->seat, time_msec, sx, sy);
+		}
+		return;
+	}
+
 	if (!surface) {
-		/* Left all of our surfaces — default arrow on the last output. */
 		wlr_seat_pointer_clear_focus(server->seat);
 		reset_cursor_to_default(server);
 		return;
 	}
 
-	/* Crossing into a different surface (possibly another of our X
-	 * windows). Reset to left_ptr first so the previous client's cursor
-	 * does not stick on the new host window until set_cursor arrives. */
 	if (prev != NULL) {
 		reset_cursor_to_default(server);
 	}
@@ -307,7 +316,7 @@ struct wlx_window *window_from_surface(struct wlr_surface *surface) {
  * surface of the grabbing client (serial == 0). That commonly happens
  * on release after a newly mapped OR popup briefly steals X11 pointer
  * events before seat focus is updated. */
-static struct wlr_surface *pointer_enter_surface_under_cursor(
+struct wlr_surface *pointer_enter_surface_under_cursor(
 		struct wlx_server *server) {
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = NULL;
@@ -383,77 +392,70 @@ static struct wlr_surface *pointer_enter_surface_under_cursor(
 	return NULL;
 }
 
-static int deferred_release_timer(void *data) {
-	struct wlx_server *server = data;
-	server->deferred_release_source = NULL;
-	if (!server->deferred_release_pending) {
-		return 0;
+void wlx_pointer_refresh_focus(struct wlx_server *server) {
+	if (!server) {
+		return;
 	}
-	server->deferred_release_pending = false;
-
-	/* If a popup grab is now active, the release is swallowed by the
-	 * grab handler (focus is on parent, not a popup surface). Otherwise
-	 * deliver it normally. */
 	pointer_enter_surface_under_cursor(server);
+}
+
+/* When a popup maps while the opening button is still held, the matching
+ * release must not reach the parent (Qt treats it as click-outside). The
+ * xdg_popup grab swallows that if grab is already active; if not, we drop
+ * the release at the compositor after updating seat button state via a
+ * focus-on-popup enter first. */
+static void handle_pointer_release(struct wlx_server *server,
+		uint32_t time_msec, uint32_t button) {
 	bool grab_active = server->seat->pointer_state.grab !=
 		server->seat->pointer_state.default_grab;
-	if (grab_active) {
-		wlr_log(WLR_DEBUG, "deferred release: popup grab active, "
-			"delivering through grab (may swallow)");
+
+	if (server->swallow_next_pointer_release) {
+		server->swallow_next_pointer_release = false;
+		/* Ensure seat button_count drops. Prefer grab path (swallows when
+		 * focus is not on a popup surface). */
+		if (!grab_active) {
+			/* Enter popup under cursor if any so grab may still be starting;
+			 * then notify release. */
+			struct wlx_popup *pop = popup_at_root_pointer(server);
+			if (pop && pop->xdg_popup) {
+				double sx = 0, sy = 0;
+				int16_t px = 0, py = 0;
+				if (query_root_pointer_position(server, &px, &py)) {
+					sx = (double)(px - server->popup_stage_root_x);
+					sy = (double)(py - server->popup_stage_root_y);
+					wlx_pointer_to_surface(server, &sx, &sy);
+				}
+				wlr_seat_pointer_notify_enter(server->seat,
+					pop->xdg_popup->base->surface, sx, sy);
+			}
+		}
+		wlr_seat_pointer_notify_button(server->seat, time_msec, button,
+			WLR_BUTTON_RELEASED);
+		/* Focus whatever is under the cursor (popup for hover). */
+		pointer_enter_surface_under_cursor(server);
+		wlr_log(WLR_DEBUG, "handled opening-click release (swallow path)");
+		return;
 	}
-	wlr_seat_pointer_notify_button(server->seat,
-		server->deferred_release_time,
-		server->deferred_release_button,
+
+	wlr_seat_pointer_notify_button(server->seat, time_msec, button,
 		WLR_BUTTON_RELEASED);
-	return 0;
+	pointer_enter_surface_under_cursor(server);
 }
 
 void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
 
-	/* Always refresh seat pointer focus before the button event — including
-	 * on release — so an active xdg_popup grab receives a non-zero serial
-	 * instead of ending the grab and destroying the popup. */
-	pointer_enter_surface_under_cursor(server);
-
 	if ((uint32_t)event->state == (uint32_t)WLR_BUTTON_PRESSED) {
-		/* Cancel any pending deferred release from a previous click. */
-		if (server->deferred_release_source) {
-			wl_event_source_remove(server->deferred_release_source);
-			server->deferred_release_source = NULL;
-		}
-		server->deferred_release_pending = false;
-
+		/* Cancel any stale swallow from a previous open that never released. */
+		server->swallow_next_pointer_release = false;
+		pointer_enter_surface_under_cursor(server);
 		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 			event->button, event->state);
 		return;
 	}
 
-	/* Release: if no popup grab yet, defer delivery so the client can
-	 * process the press, create an xdg_popup and call grab() first.
-	 * Without this, Qt receives press+release on the parent in one go,
-	 * treats the release as click-outside, and unmaps the menu instantly. */
-	bool grab_active = server->seat->pointer_state.grab !=
-		server->seat->pointer_state.default_grab;
-	if (!grab_active && server->loop) {
-		if (server->deferred_release_source) {
-			wl_event_source_remove(server->deferred_release_source);
-			server->deferred_release_source = NULL;
-		}
-		server->deferred_release_pending = true;
-		server->deferred_release_time = event->time_msec;
-		server->deferred_release_button = event->button;
-		server->deferred_release_source = wl_event_loop_add_timer(
-			server->loop, deferred_release_timer, server);
-		/* ~50ms is enough for a client round-trip on local sockets. */
-		wl_event_source_timer_update(server->deferred_release_source, 50);
-		wlr_log(WLR_DEBUG, "deferring button release %ums for popup grab",
-			event->time_msec);
-	} else {
-		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
-			event->button, event->state);
-	}
+	handle_pointer_release(server, event->time_msec, event->button);
 
 	if (server->move_win) {
 		wlr_log(WLR_INFO, "ending self-driven interactive move");
