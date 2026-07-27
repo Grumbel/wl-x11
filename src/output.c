@@ -179,10 +179,17 @@ void output_commit(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_INFO, "X11 window resized to %dx%d, propagating to toplevel", w, h);
 	if (win->toplevel) {
-		/* Client sees logical window geometry; host may be larger by CSD margin. */
+		/* Client sees logical window geometry; host may be larger by CSD
+		 * shadow margin. Maximized/fullscreen clients drop the shadow, so
+		 * do not subtract a stale margin or the buffer undersizes the X
+		 * window and pointer hits drift. */
 		int lw = wlx_unscale_size(win->server, w);
 		int lh = wlx_unscale_size(win->server, h);
-		if (win->server->prefer_csd) {
+		bool tiled = win->toplevel->current.maximized ||
+			win->toplevel->pending.maximized ||
+			win->toplevel->current.fullscreen ||
+			win->toplevel->pending.fullscreen;
+		if (win->server->prefer_csd && !tiled) {
 			lw -= win->csd_margin_w;
 			lh -= win->csd_margin_h;
 			if (lw < 1) {

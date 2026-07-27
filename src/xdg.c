@@ -405,6 +405,11 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 			wlr_log(WLR_ERROR, "failed to create OR output for popup");
 			return;
 		}
+		/* Same as toplevel outputs: cursor buffer path asserts on a
+		 * non-NULL allocator/renderer when the pointer enters this window. */
+		wlr_output_init_render(pop->output, pop->server->allocator,
+			pop->server->renderer);
+
 		pop->output_frame.notify = popup_output_frame;
 		wl_signal_add(&pop->output->events.frame, &pop->output_frame);
 		pop->output_destroy.notify = popup_output_destroy;
@@ -497,6 +502,22 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 static void popup_commit(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, commit);
 	(void)data;
+
+	/* First commit: wlroots has marked the surface initialized (role
+	 * commit runs before this listener). Unconstrain schedules the
+	 * configure the client needs before attaching a buffer. Calling
+	 * unconstrain in new_popup / setup_popup trips
+	 * assert(surface->initialized) inside schedule_configure. */
+	if (pop->xdg_popup->base->initial_commit) {
+		struct wlr_box box = {
+			.x = -2000,
+			.y = -2000,
+			.width = 8000,
+			.height = 8000,
+		};
+		wlr_xdg_popup_unconstrain_from_box(pop->xdg_popup, &box);
+	}
+
 	if (!pop->xdg_popup->base->surface->mapped) {
 		return;
 	}
@@ -543,15 +564,8 @@ static void setup_popup(struct wlx_server *server, struct wlr_xdg_popup *xdg_pop
 	}
 	pop->scene_tree->node.data = pop;
 
-	/* Unconstrained box: large area so the client does not flip/resize
-	 * aggressively; we still place the OR window ourselves. */
-	struct wlr_box box = {
-		.x = -2000,
-		.y = -2000,
-		.width = 8000,
-		.height = 8000,
-	};
-	wlr_xdg_popup_unconstrain_from_box(xdg_popup, &box);
+	/* Unconstrain is deferred to popup_commit on initial_commit — the
+	 * surface is not initialized yet when new_popup fires. */
 
 	pop->map.notify = popup_map;
 	wl_signal_add(&xdg_popup->base->surface->events.map, &pop->map);

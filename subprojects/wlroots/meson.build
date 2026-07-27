@@ -140,7 +140,7 @@ subdir('backend')
 subdir('types')
 subdir('util')
 subdir('xcursor')
-subdir('xwayland')
+# xwayland/ tree removed in this wl-x11 fork — always built with -Dxwayland=disabled.
 
 subdir('include')
 
@@ -173,14 +173,7 @@ meson.override_dependency(versioned_name, wlroots)
 
 summary(features + internal_features, bool_yn: true)
 
-if get_option('examples')
-	subdir('examples')
-	subdir('tinywl')
-endif
-
-if get_option('tests')
-	subdir('test')
-endif
+# examples/, tinywl/, test/ trees removed in this wl-x11 fork.
 
 pkgconfig = import('pkgconfig')
 pkgconfig.generate(

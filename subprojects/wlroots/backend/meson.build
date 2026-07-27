@@ -1,6 +1,6 @@
 wlr_files += files('backend.c')
 
-all_backends = ['drm', 'libinput', 'x11']
+all_backends = ['x11']  # drm/libinput trees removed in this wl-x11 fork
 backends = get_option('backends')
 if 'auto' in backends and get_option('auto_features').enabled()
 	backends = all_backends
@@ -16,7 +16,8 @@ if get_option('session').disabled()
 	session_required = disabler()
 endif
 
-subdir('session')
+# session/, drm/, libinput/ trees removed in this wl-x11 fork (X11-only).
+# Re-add from upstream if you enable those backends.
 
 foreach backend : all_backends
 	if backend in backends or 'auto' in backends

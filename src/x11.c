@@ -330,12 +330,22 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 		wlr_log(WLR_INFO, "host _NET_WM_STATE maximized=%d → xdg_toplevel",
 			maximized);
 		win->size_from_wm = true;
+		/* CSD drop-shadow goes away when maximized; clear so a concurrent
+		 * host resize does not subtract the old margin from the configure. */
+		if (maximized) {
+			win->csd_margin_w = 0;
+			win->csd_margin_h = 0;
+		}
 		wlr_xdg_toplevel_set_maximized(win->toplevel, maximized);
 	}
 	if (fullscreen != cur_fs) {
 		wlr_log(WLR_INFO, "host _NET_WM_STATE fullscreen=%d → xdg_toplevel",
 			fullscreen);
 		win->size_from_wm = true;
+		if (fullscreen) {
+			win->csd_margin_w = 0;
+			win->csd_margin_h = 0;
+		}
 		wlr_xdg_toplevel_set_fullscreen(win->toplevel, fullscreen);
 	}
 }
