@@ -124,6 +124,15 @@ struct wlx_server {
 	struct wl_list popups; /* wlx_popup.link */ /* wlx_window::link */
 	struct wlx_window *focused_window;
 
+	/* Deferred pointer button release: held briefly so the client can
+	 * process the matching press, create an xdg_popup and take a grab
+	 * before the release is delivered. Otherwise Qt treats the release
+	 * as "click outside" and destroys the menu in the same frame. */
+	struct wl_event_source *deferred_release_source;
+	uint32_t deferred_release_time;
+	uint32_t deferred_release_button;
+	bool deferred_release_pending;
+
 	/* Self-driven interactive move/resize state.
 	 *
 	 * We don't delegate this to the host WM via _NET_WM_MOVERESIZE: doing
@@ -378,6 +387,8 @@ struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w);
 struct wlx_window *window_from_surface(struct wlr_surface *surface);
 struct wlx_window *window_at_root_pointer(struct wlx_server *server);
 struct wlx_popup *popup_at_root_pointer(struct wlx_server *server);
+/* True if any mapped popup belongs to this toplevel. */
+bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win);
 bool pointer_coords_on_window(struct wlx_server *server, struct wlx_window *win, double *sx, double *sy);
 void select_window_events(struct wlx_server *server, xcb_window_t w);
 void register_x11_window_subtree(struct wlx_window *win, xcb_window_t w);

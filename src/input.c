@@ -274,83 +274,155 @@ struct wlx_window *window_from_surface(struct wlr_surface *surface) {
 	return xdg_surface->data;
 }
 
+/* Resolve the surface under the root pointer and notify pointer enter.
+ * Used for both press and release: xdg popup grabs end the grab (and
+ * dismiss the popup) when a button event is delivered with no focused
+ * surface of the grabbing client (serial == 0). That commonly happens
+ * on release after a newly mapped OR popup briefly steals X11 pointer
+ * events before seat focus is updated. */
+static struct wlr_surface *pointer_enter_surface_under_cursor(
+		struct wlx_server *server) {
+	double sx = 0, sy = 0;
+	struct wlr_surface *surface = NULL;
+
+	struct wlx_popup *pop_under = popup_at_root_pointer(server);
+	if (pop_under && pop_under->xdg_popup && pop_under->output) {
+		int16_t px = 0, py = 0, ox = 0, oy = 0;
+		xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
+		if (query_root_pointer_position(server, &px, &py) &&
+				xwin != XCB_WINDOW_NONE &&
+				query_window_root_position(server, xwin, &ox, &oy)) {
+			sx = (double)(px - ox);
+			sy = (double)(py - oy);
+			wlx_pointer_to_surface(server, &sx, &sy);
+			surface = pop_under->xdg_popup->base->surface;
+			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+			return surface;
+		}
+	}
+
+	struct wlx_window *win = window_at_root_pointer(server);
+	if (win && win->toplevel &&
+			pointer_coords_on_window(server, win, &sx, &sy)) {
+		wlx_pointer_to_surface(server, &sx, &sy);
+		/* Hit-test within this window so subsurfaces get the button
+		 * serial clients need for xdg_popup.grab. */
+		if (win->scene_tree) {
+			double hx = sx, hy = sy;
+			struct wlr_scene_node *node = wlr_scene_node_at(
+				&win->scene_tree->node, sx, sy, &hx, &hy);
+			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
+				struct wlr_scene_buffer *buf =
+					wlr_scene_buffer_from_node(node);
+				struct wlr_scene_surface *ss =
+					wlr_scene_surface_try_from_buffer(buf);
+				if (ss) {
+					surface = ss->surface;
+					sx = hx;
+					sy = hy;
+				}
+			}
+		}
+		if (!surface) {
+			surface = win->toplevel->base->surface;
+		}
+		set_active_window(server, win);
+		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+		return surface;
+	}
+
+	surface = surface_at_cursor(server, &sx, &sy);
+	if (surface) {
+		struct wlx_window *from_scene = window_from_surface(surface);
+		if (from_scene) {
+			set_active_window(server, from_scene);
+		}
+		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+	}
+	return surface;
+}
+
+static int deferred_release_timer(void *data) {
+	struct wlx_server *server = data;
+	server->deferred_release_source = NULL;
+	if (!server->deferred_release_pending) {
+		return 0;
+	}
+	server->deferred_release_pending = false;
+
+	/* If a popup grab is now active, the release is swallowed by the
+	 * grab handler (focus is on parent, not a popup surface). Otherwise
+	 * deliver it normally. */
+	pointer_enter_surface_under_cursor(server);
+	bool grab_active = server->seat->pointer_state.grab !=
+		server->seat->pointer_state.default_grab;
+	if (grab_active) {
+		wlr_log(WLR_DEBUG, "deferred release: popup grab active, "
+			"delivering through grab (may swallow)");
+	}
+	wlr_seat_pointer_notify_button(server->seat,
+		server->deferred_release_time,
+		server->deferred_release_button,
+		WLR_BUTTON_RELEASED);
+	return 0;
+}
+
 void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
 
+	/* Always refresh seat pointer focus before the button event — including
+	 * on release — so an active xdg_popup grab receives a non-zero serial
+	 * instead of ending the grab and destroying the popup. */
+	pointer_enter_surface_under_cursor(server);
+
 	if ((uint32_t)event->state == (uint32_t)WLR_BUTTON_PRESSED) {
-		double sx = 0, sy = 0;
-		struct wlr_surface *surface = NULL;
+		/* Cancel any pending deferred release from a previous click. */
+		if (server->deferred_release_source) {
+			wl_event_source_remove(server->deferred_release_source);
+			server->deferred_release_source = NULL;
+		}
+		server->deferred_release_pending = false;
 
-		struct wlx_popup *pop_under = popup_at_root_pointer(server);
-		if (pop_under && pop_under->xdg_popup && pop_under->output) {
-			int16_t px = 0, py = 0, ox = 0, oy = 0;
-			xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
-			if (query_root_pointer_position(server, &px, &py) &&
-					xwin != XCB_WINDOW_NONE &&
-					query_window_root_position(server, xwin, &ox, &oy)) {
-				sx = (double)(px - ox);
-				sy = (double)(py - oy);
-				wlx_pointer_to_surface(server, &sx, &sy);
-				surface = pop_under->xdg_popup->base->surface;
-				wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-			}
-		}
-
-		struct wlx_window *win = surface ? NULL : window_at_root_pointer(server);
-		if (!surface && win && win->toplevel &&
-				pointer_coords_on_window(server, win, &sx, &sy)) {
-			wlx_pointer_to_surface(server, &sx, &sy);
-			/* Hit-test within this window so subsurfaces get the button
-			 * serial GTK needs for xdg_popup.grab. */
-			if (win->scene_tree) {
-				double hx = sx, hy = sy;
-				struct wlr_scene_node *node = wlr_scene_node_at(
-					&win->scene_tree->node, sx, sy, &hx, &hy);
-				if (node && node->type == WLR_SCENE_NODE_BUFFER) {
-					struct wlr_scene_buffer *buf =
-						wlr_scene_buffer_from_node(node);
-					struct wlr_scene_surface *ss =
-						wlr_scene_surface_try_from_buffer(buf);
-					if (ss) {
-						surface = ss->surface;
-						sx = hx;
-						sy = hy;
-					}
-				}
-			}
-			if (!surface) {
-				surface = win->toplevel->base->surface;
-			}
-			set_active_window(server, win);
-			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-		}
-		if (!surface) {
-			surface = surface_at_cursor(server, &sx, &sy);
-			if (surface) {
-				struct wlx_window *from_scene = window_from_surface(surface);
-				if (from_scene) {
-					set_active_window(server, from_scene);
-				}
-				wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-			}
-		}
+		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+			event->button, event->state);
+		return;
 	}
 
-	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
-		event->button, event->state);
-
-	if ((uint32_t)event->state != (uint32_t)WLR_BUTTON_PRESSED) {
-		if (server->move_win) {
-			wlr_log(WLR_INFO, "ending self-driven interactive move");
-			server->move_win = NULL;
+	/* Release: if no popup grab yet, defer delivery so the client can
+	 * process the press, create an xdg_popup and call grab() first.
+	 * Without this, Qt receives press+release on the parent in one go,
+	 * treats the release as click-outside, and unmaps the menu instantly. */
+	bool grab_active = server->seat->pointer_state.grab !=
+		server->seat->pointer_state.default_grab;
+	if (!grab_active && server->loop) {
+		if (server->deferred_release_source) {
+			wl_event_source_remove(server->deferred_release_source);
+			server->deferred_release_source = NULL;
 		}
-		if (server->resize_win) {
-			wlr_log(WLR_INFO, "ending self-driven interactive resize");
-			server->resize_win = NULL;
-		}
-		dnd_out_on_button_release(server);
+		server->deferred_release_pending = true;
+		server->deferred_release_time = event->time_msec;
+		server->deferred_release_button = event->button;
+		server->deferred_release_source = wl_event_loop_add_timer(
+			server->loop, deferred_release_timer, server);
+		/* ~50ms is enough for a client round-trip on local sockets. */
+		wl_event_source_timer_update(server->deferred_release_source, 50);
+		wlr_log(WLR_DEBUG, "deferring button release %ums for popup grab",
+			event->time_msec);
+	} else {
+		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
+			event->button, event->state);
 	}
+
+	if (server->move_win) {
+		wlr_log(WLR_INFO, "ending self-driven interactive move");
+		server->move_win = NULL;
+	}
+	if (server->resize_win) {
+		wlr_log(WLR_INFO, "ending self-driven interactive resize");
+		server->resize_win = NULL;
+	}
+	dnd_out_on_button_release(server);
 }
 
 void server_cursor_axis(struct wl_listener *listener, void *data) {

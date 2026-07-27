@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wlr/util/log.h>
 #include "types/wlr_xdg_shell.h"
 
 void handle_xdg_popup_ack_configure(
@@ -39,6 +40,7 @@ struct wlr_xdg_popup_configure *send_xdg_popup_configure(
 }
 
 static void xdg_popup_grab_end(struct wlr_xdg_popup_grab *popup_grab) {
+	wlr_log(WLR_INFO, "xdg_popup_grab_end: dismissing popups");
 	struct wlr_xdg_popup *popup, *tmp;
 	wl_list_for_each_safe(popup, tmp, &popup_grab->popups, grab_link) {
 		xdg_popup_send_popup_done(popup->resource);
@@ -47,6 +49,20 @@ static void xdg_popup_grab_end(struct wlr_xdg_popup_grab *popup_grab) {
 	wlr_seat_pointer_end_grab(popup_grab->seat);
 	wlr_seat_keyboard_end_grab(popup_grab->seat);
 	wlr_seat_touch_end_grab(popup_grab->seat);
+}
+
+static bool surface_is_grab_popup(struct wlr_xdg_popup_grab *popup_grab,
+		struct wlr_surface *surface) {
+	if (surface == NULL) {
+		return false;
+	}
+	struct wlr_xdg_popup *popup;
+	wl_list_for_each(popup, &popup_grab->popups, grab_link) {
+		if (popup->base && popup->base->surface == surface) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void xdg_pointer_grab_enter(struct wlr_seat_pointer_grab *grab,
@@ -70,14 +86,57 @@ static void xdg_pointer_grab_motion(struct wlr_seat_pointer_grab *grab,
 
 static uint32_t xdg_pointer_grab_button(struct wlr_seat_pointer_grab *grab,
 		uint32_t time, uint32_t button, uint32_t state) {
+	struct wlr_xdg_popup_grab *popup_grab = grab->data;
+	struct wlr_surface *focus = grab->seat->pointer_state.focused_surface;
+
+	/* Swallow button *release* when focus is not on a grabbed popup surface.
+	 * The opening click is almost always press-on-parent + release-on-parent
+	 * (same wl_client as the menu). Delivering that release to the parent
+	 * makes Qt treat it as "click outside" and destroy the popup before it
+	 * is painted. Presses outside still dismiss via the failed-send path. */
+	if (state == WL_POINTER_BUTTON_STATE_RELEASED &&
+			!surface_is_grab_popup(popup_grab, focus)) {
+		wlr_log(WLR_DEBUG, "xdg popup grab: swallowing release (focus not on popup)");
+		return 0;
+	}
+
 	uint32_t serial =
 		wlr_seat_pointer_send_button(grab->seat, time, button, state);
 	if (serial) {
 		return serial;
-	} else {
-		xdg_popup_grab_end(grab->data);
-		return 0;
 	}
+	/* Failed press (no focused surface of this client) → click outside.
+	 * Exception: while any grab popup is still unmapped / just mapped, X11
+	 * often synthesizes a ButtonPress on the new OR window under a held
+	 * click. Treating that as "click outside" dismisses the menu instantly.
+	 * Only dismiss once every grabbed popup is mapped and the opening
+	 * button is no longer held. */
+	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		struct wlr_xdg_popup *popup;
+		bool any_unmapped = false;
+		wl_list_for_each(popup, &popup_grab->popups, grab_link) {
+			if (!popup->base->surface->mapped) {
+				any_unmapped = true;
+				break;
+			}
+		}
+		if (any_unmapped) {
+			wlr_log(WLR_INFO, "xdg popup grab: ignoring failed press "
+				"(popup not mapped yet — likely X11 map under held button)");
+			return 0;
+		}
+		/* button_count already includes this press (notify_button updates
+		 * it first). count > 1 ⇒ another button was already held. */
+		if (grab->seat->pointer_state.button_count > 1) {
+			wlr_log(WLR_INFO, "xdg popup grab: ignoring failed press "
+				"(opening button still held, count=%zu)",
+				grab->seat->pointer_state.button_count);
+			return 0;
+		}
+		wlr_log(WLR_INFO, "xdg popup grab: failed press → dismiss (click outside)");
+		xdg_popup_grab_end(popup_grab);
+	}
+	return 0;
 }
 
 static void xdg_pointer_grab_axis(struct wlr_seat_pointer_grab *grab,
@@ -93,6 +152,7 @@ static void xdg_pointer_grab_frame(struct wlr_seat_pointer_grab *grab) {
 }
 
 static void xdg_pointer_grab_cancel(struct wlr_seat_pointer_grab *grab) {
+	wlr_log(WLR_INFO, "xdg popup grab: pointer grab cancelled");
 	xdg_popup_grab_end(grab->data);
 }
 
@@ -142,7 +202,9 @@ static uint32_t xdg_touch_grab_down(struct wlr_seat_touch_grab *grab,
 		uint32_t time, struct wlr_touch_point *point) {
 	struct wlr_xdg_popup_grab *popup_grab = grab->data;
 
-	if (wl_resource_get_client(point->surface->resource) != popup_grab->client) {
+	if (point->surface == NULL ||
+			wl_resource_get_client(point->surface->resource) != popup_grab->client) {
+		wlr_log(WLR_INFO, "xdg popup grab: touch down outside client — dismiss");
 		xdg_popup_grab_end(grab->data);
 		return 0;
 	}
@@ -306,12 +368,16 @@ static void xdg_popup_handle_grab(struct wl_client *client,
 
 	wl_list_insert(&popup_grab->popups, &popup->grab_link);
 
+	wlr_log(WLR_INFO, "xdg_popup grab start (serial=%u, client=%p)",
+		serial, (void *)popup_grab->client);
+
 	wlr_seat_pointer_start_grab(seat_client->seat,
 		&popup_grab->pointer_grab);
 	wlr_seat_keyboard_start_grab(seat_client->seat,
 		&popup_grab->keyboard_grab);
-	wlr_seat_touch_start_grab(seat_client->seat,
-		&popup_grab->touch_grab);
+	/* Skip touch grab: each X11 OR popup output registers a touch device;
+	 * spurious touch events on map would call xdg_touch_grab_down with a
+	 * foreign surface and immediately popup_done the menu. */
 }
 
 static void xdg_popup_handle_reposition(
@@ -468,6 +534,8 @@ void reset_xdg_popup(struct wlr_xdg_popup *popup) {
 }
 
 void destroy_xdg_popup(struct wlr_xdg_popup *popup) {
+	wlr_log(WLR_INFO, "destroy_xdg_popup (mapped=%d seat=%p)",
+		popup->base->surface->mapped, (void *)popup->seat);
 	wlr_surface_unmap(popup->base->surface);
 	reset_xdg_popup(popup);
 

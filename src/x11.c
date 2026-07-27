@@ -601,6 +601,12 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 							"another of our windows, not clearing", fo->event);
 					} else if (under == win) {
 						/* Spurious focus churn inside the same toplevel. */
+					} else if (popup_at_root_pointer(server) ||
+							window_has_mapped_popup(server, win)) {
+						/* Qt/GTK dismiss menus when keyboard focus is
+						 * cleared. Keep focus while an OR popup is up. */
+						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x — popup active, "
+							"keeping keyboard focus", fo->event);
 					} else {
 						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x (mode %u detail %u)",
 							fo->event, fo->mode, fo->detail);

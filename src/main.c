@@ -454,6 +454,10 @@ int main(int argc, char **argv) {
 		wl_event_source_remove(server.sigterm_source);
 		server.sigterm_source = NULL;
 	}
+	if (server.deferred_release_source) {
+		wl_event_source_remove(server.deferred_release_source);
+		server.deferred_release_source = NULL;
+	}
 
 	wlr_scene_node_destroy(&server.scene->tree.node);
 	wlr_cursor_destroy(server.cursor);
