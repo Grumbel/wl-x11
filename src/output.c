@@ -513,35 +513,35 @@ struct wlx_window *window_at_root_pointer(struct wlx_server *server) {
 	return NULL;
 }
 
-/* Pointer coordinates relative to the toplevel surface, from the real
- * X11 pointer position (not the possibly-stale layout cursor). */
+/* Pointer coordinates relative to the wlroots output window (the drawable
+ * we render into), from the real X11 root pointer — not content_xwin (may
+ * be the WM frame after reparent) and not the layout cursor. */
 bool pointer_coords_on_window(struct wlx_server *server,
 		struct wlx_window *win, double *sx, double *sy) {
-	if (!win || !win->toplevel) {
+	if (!win || !win->toplevel || !win->output || !server->xcb) {
 		return false;
 	}
-	xcb_window_t target = win->content_xwin != XCB_WINDOW_NONE
-		? win->content_xwin : win->xwin;
-	if (target == XCB_WINDOW_NONE || !server->xcb) {
+	xcb_window_t target = wlr_x11_output_get_window(win->output);
+	if (target == XCB_WINDOW_NONE) {
+		target = win->content_xwin != XCB_WINDOW_NONE
+			? win->content_xwin : win->xwin;
+	}
+	if (target == XCB_WINDOW_NONE) {
 		return false;
 	}
 	int16_t px = 0, py = 0;
 	if (!query_root_pointer_position(server, &px, &py)) {
 		return false;
 	}
-	xcb_translate_coordinates_cookie_t tc =
-		xcb_translate_coordinates(server->xcb, server->xcb_root, target, px, py);
-	xcb_translate_coordinates_reply_t *tr =
-		xcb_translate_coordinates_reply(server->xcb, tc, NULL);
-	if (!tr) {
+	/* Prefer root - window_origin: translate_coordinates to a reparented
+	 * frame can include decoration offsets; the output window origin is
+	 * exactly where our buffer is drawn. */
+	int16_t ox = 0, oy = 0;
+	if (!query_window_root_position(server, target, &ox, &oy)) {
 		return false;
 	}
-	*sx = (double)tr->dst_x;
-	*sy = (double)tr->dst_y;
-	free(tr);
-
-	/* Host is buffer-sized and the scene is forced to (0,0), so X11
-	 * window-local coords already match surface-local coords. */
+	*sx = (double)(px - ox);
+	*sy = (double)(py - oy);
 	return true;
 }
 

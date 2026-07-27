@@ -572,6 +572,14 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 					if (win->toplevel &&
 							pointer_coords_on_window(server, win, &sx, &sy)) {
 						wlx_pointer_to_surface(server, &sx, &sy);
+						if (!server->prefer_csd) {
+							struct wlr_box geo =
+								win->toplevel->base->current.geometry;
+							if (geo.width > 0 && geo.height > 0) {
+								sx += geo.x;
+								sy += geo.y;
+							}
+						}
 						reset_cursor_to_default(server);
 						wlr_seat_pointer_notify_enter(server->seat,
 							win->toplevel->base->surface, sx, sy);

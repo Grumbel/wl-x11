@@ -465,19 +465,30 @@ struct wlx_popup *popup_at_root_pointer(struct wlx_server *server) {
 	}
 	struct wlx_popup *pop;
 	wl_list_for_each(pop, &server->popups, link) {
-		if (!pop->output) {
+		if (!pop->output || !pop->xdg_popup ||
+				!pop->xdg_popup->base->surface->mapped) {
 			continue;
 		}
-		xcb_window_t xwin = wlr_x11_output_get_window(pop->output);
-		if (xwin == XCB_WINDOW_NONE) {
-			continue;
+		int ox, oy, w, h;
+		if (pop->output == server->popup_stage_output) {
+			ox = server->popup_stage_root_x;
+			oy = server->popup_stage_root_y;
+			w = pop->output->width;
+			h = pop->output->height;
+		} else {
+			xcb_window_t xwin = wlr_x11_output_get_window(pop->output);
+			if (xwin == XCB_WINDOW_NONE) {
+				continue;
+			}
+			int16_t qx = 0, qy = 0;
+			if (!query_window_root_position(server, xwin, &qx, &qy)) {
+				continue;
+			}
+			ox = qx;
+			oy = qy;
+			w = pop->output->width;
+			h = pop->output->height;
 		}
-		int16_t ox = 0, oy = 0;
-		if (!query_window_root_position(server, xwin, &ox, &oy)) {
-			continue;
-		}
-		int w = pop->output->width;
-		int h = pop->output->height;
 		if (px >= ox && py >= oy && px < ox + w && py < oy + h) {
 			return pop;
 		}
@@ -608,6 +619,13 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, unmap);
 	(void)data;
 	wlr_log(WLR_INFO, "xdg_popup unmap");
+	/* Drop seat focus if it still points at this popup — otherwise the next
+	 * open can leave motion/button serials stuck on a destroyed surface. */
+	if (pop->xdg_popup && pop->server->seat &&
+			pop->server->seat->pointer_state.focused_surface ==
+				pop->xdg_popup->base->surface) {
+		wlr_seat_pointer_clear_focus(pop->server->seat);
+	}
 	/* Shared stage is not destroyed — only detach this popup from it. */
 	if (pop->output == pop->server->popup_stage_output) {
 		pop->output = NULL;

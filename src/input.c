@@ -160,14 +160,22 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 	double sx = 0, sy = 0;
 	struct wlr_surface *surface = NULL;
 
-	/* Popups are OR windows not tracked as wlx_window — check first. */
+	/* Popups use the shared stage OR window — check first. */
 	struct wlx_popup *pop_under = popup_at_root_pointer(server);
 	if (pop_under && pop_under->xdg_popup && pop_under->output) {
-		int16_t px = 0, py = 0, ox = 0, oy = 0;
-		xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
-		if (query_root_pointer_position(server, &px, &py) &&
-				xwin != XCB_WINDOW_NONE &&
-				query_window_root_position(server, xwin, &ox, &oy)) {
+		int16_t px = 0, py = 0;
+		if (query_root_pointer_position(server, &px, &py)) {
+			int ox = server->popup_stage_root_x;
+			int oy = server->popup_stage_root_y;
+			if (pop_under->output != server->popup_stage_output) {
+				int16_t qx = 0, qy = 0;
+				xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
+				if (xwin != XCB_WINDOW_NONE &&
+						query_window_root_position(server, xwin, &qx, &qy)) {
+					ox = qx;
+					oy = qy;
+				}
+			}
 			sx = (double)(px - ox);
 			sy = (double)(py - oy);
 			wlx_pointer_to_surface(server, &sx, &sy);
@@ -178,30 +186,49 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 	struct wlx_window *under = surface ? NULL : window_at_root_pointer(server);
 	if (!surface && under && under->toplevel &&
 			pointer_coords_on_window(server, under, &sx, &sy)) {
-		wlx_pointer_to_surface(server, &sx, &sy);
+		/* sx/sy = output-window-local pixels (where we paint the buffer). */
+		double pix_sx = sx, pix_sy = sy;
+		double log_sx = pix_sx, log_sy = pix_sy;
+		wlx_pointer_to_surface(server, &log_sx, &log_sy);
+
+		surface = under->toplevel->base->surface;
+		sx = log_sx;
+		sy = log_sy;
+		/* SSD: host is geometry-sized; buffer origin is inset by geometry. */
+		if (!under->server->prefer_csd) {
+			struct wlr_box geo = under->toplevel->base->current.geometry;
+			if (geo.width > 0 && geo.height > 0) {
+				sx += geo.x;
+				sy += geo.y;
+			}
+		}
+
+		/* Optional subsurface: node_at needs layout-local (absolute) coords. */
 		if (under->scene_tree) {
-			double hx = sx, hy = sy;
+			int ox = 0, oy = 0;
+			wlr_scene_node_coords(&under->scene_tree->node, &ox, &oy);
+			double lx = (double)ox + pix_sx;
+			double ly = (double)oy + pix_sy;
+			double hx = 0, hy = 0;
 			struct wlr_scene_node *node = wlr_scene_node_at(
-				&under->scene_tree->node, sx, sy, &hx, &hy);
+				&server->scene->tree.node, lx, ly, &hx, &hy);
 			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
 				struct wlr_scene_buffer *buf =
 					wlr_scene_buffer_from_node(node);
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
-				if (ss) {
+				if (ss && ss->surface != under->toplevel->base->surface) {
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
+					wlx_pointer_to_surface(server, &sx, &sy);
 				}
 			}
 		}
-		if (!surface) {
-			surface = under->toplevel->base->surface;
-		}
 	}
-	if (!surface) {
-		surface = surface_at_cursor(server, &sx, &sy);
-	}
+	/* Do not fall back to layout-cursor scene picking: outputs are laid out
+	 * side-by-side while X11 windows are freely placed, so cursor layout
+	 * coords are almost always wrong and produce huge pointer offsets. */
 
 	struct wlr_surface *prev = server->seat->pointer_state.focused_surface;
 	if (surface == prev) {
@@ -287,11 +314,20 @@ static struct wlr_surface *pointer_enter_surface_under_cursor(
 
 	struct wlx_popup *pop_under = popup_at_root_pointer(server);
 	if (pop_under && pop_under->xdg_popup && pop_under->output) {
-		int16_t px = 0, py = 0, ox = 0, oy = 0;
-		xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
-		if (query_root_pointer_position(server, &px, &py) &&
-				xwin != XCB_WINDOW_NONE &&
-				query_window_root_position(server, xwin, &ox, &oy)) {
+		int16_t px = 0, py = 0;
+		if (query_root_pointer_position(server, &px, &py)) {
+			/* Prefer our recorded stage origin — X query can lag Configure. */
+			int ox = server->popup_stage_root_x;
+			int oy = server->popup_stage_root_y;
+			if (pop_under->output != server->popup_stage_output) {
+				int16_t qx = 0, qy = 0;
+				xcb_window_t xwin = wlr_x11_output_get_window(pop_under->output);
+				if (xwin != XCB_WINDOW_NONE &&
+						query_window_root_position(server, xwin, &qx, &qy)) {
+					ox = qx;
+					oy = qy;
+				}
+			}
 			sx = (double)(px - ox);
 			sy = (double)(py - oy);
 			wlx_pointer_to_surface(server, &sx, &sy);
@@ -304,42 +340,47 @@ static struct wlr_surface *pointer_enter_surface_under_cursor(
 	struct wlx_window *win = window_at_root_pointer(server);
 	if (win && win->toplevel &&
 			pointer_coords_on_window(server, win, &sx, &sy)) {
-		wlx_pointer_to_surface(server, &sx, &sy);
-		/* Hit-test within this window so subsurfaces get the button
-		 * serial clients need for xdg_popup.grab. */
+		double pix_sx = sx, pix_sy = sy;
+		double log_sx = pix_sx, log_sy = pix_sy;
+		wlx_pointer_to_surface(server, &log_sx, &log_sy);
+
+		surface = win->toplevel->base->surface;
+		sx = log_sx;
+		sy = log_sy;
+		if (!win->server->prefer_csd) {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			if (geo.width > 0 && geo.height > 0) {
+				sx += geo.x;
+				sy += geo.y;
+			}
+		}
 		if (win->scene_tree) {
-			double hx = sx, hy = sy;
+			int ox = 0, oy = 0;
+			wlr_scene_node_coords(&win->scene_tree->node, &ox, &oy);
+			double lx = (double)ox + pix_sx;
+			double ly = (double)oy + pix_sy;
+			double hx = 0, hy = 0;
 			struct wlr_scene_node *node = wlr_scene_node_at(
-				&win->scene_tree->node, sx, sy, &hx, &hy);
+				&server->scene->tree.node, lx, ly, &hx, &hy);
 			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
 				struct wlr_scene_buffer *buf =
 					wlr_scene_buffer_from_node(node);
 				struct wlr_scene_surface *ss =
 					wlr_scene_surface_try_from_buffer(buf);
-				if (ss) {
+				if (ss && ss->surface != win->toplevel->base->surface) {
 					surface = ss->surface;
 					sx = hx;
 					sy = hy;
+					wlx_pointer_to_surface(server, &sx, &sy);
 				}
 			}
-		}
-		if (!surface) {
-			surface = win->toplevel->base->surface;
 		}
 		set_active_window(server, win);
 		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
 		return surface;
 	}
 
-	surface = surface_at_cursor(server, &sx, &sy);
-	if (surface) {
-		struct wlx_window *from_scene = window_from_surface(surface);
-		if (from_scene) {
-			set_active_window(server, from_scene);
-		}
-		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-	}
-	return surface;
+	return NULL;
 }
 
 static int deferred_release_timer(void *data) {
