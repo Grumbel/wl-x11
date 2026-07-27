@@ -92,7 +92,10 @@ void client_created_notify(struct wl_listener *listener, void *data) {
 
 int main(int argc, char **argv) {
 	bool debug = false;
+	/* Default is SSD (host WM decorations). --csd / --ssd set this
+	 * explicitly; last one wins if both appear. */
 	bool prefer_csd = false;
+	bool decoration_flag_set = false;
 	double content_scale = 1.0;
 	char **command_argv = NULL;
 	for (int i = 1; i < argc; i++) {
@@ -100,6 +103,10 @@ int main(int argc, char **argv) {
 			debug = true;
 		} else if (strcmp(argv[i], "--csd") == 0) {
 			prefer_csd = true;
+			decoration_flag_set = true;
+		} else if (strcmp(argv[i], "--ssd") == 0) {
+			prefer_csd = false;
+			decoration_flag_set = true;
 		} else if (strcmp(argv[i], "--scale") == 0) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "wl-x11: --scale requires a number\n");
@@ -119,9 +126,14 @@ int main(int argc, char **argv) {
 				return 1;
 			}
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-			printf("usage: wl-x11 [--debug] [--csd] [--scale FACTOR] [command [args...]]\n"
+			printf("usage: wl-x11 [--debug] [--ssd|--csd] [--scale FACTOR] "
+				"[command [args...]]\n"
 				"  --debug             print verbose diagnostic logging "
 				"(default: only errors)\n"
+				"  --ssd               server-side decorations via the host "
+				"WM (default):\n"
+				"                      clients are asked not to draw CSD/"
+				"shadows\n"
 				"  --csd               client-side decorations: no host WM "
 				"border/title;\n"
 				"                      Wayland clients draw their own chrome\n"
@@ -166,6 +178,9 @@ int main(int argc, char **argv) {
 	if (server.prefer_csd) {
 		wlr_log(WLR_INFO, "prefer client-side decorations (--csd)");
 		fprintf(stderr, "wl-x11: client-side decorations (no host WM border)\n");
+	} else if (decoration_flag_set) {
+		wlr_log(WLR_INFO, "prefer server-side decorations (--ssd)");
+		fprintf(stderr, "wl-x11: server-side decorations (host WM frame)\n");
 	}
 	server.clip_read_fd = -1;
 	server.wl_display = wl_display_create();
