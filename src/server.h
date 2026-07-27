@@ -32,6 +32,7 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_viewporter.h>
@@ -90,6 +91,9 @@ struct wlx_server {
 
 	struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
 	struct wl_listener new_toplevel_decoration;
+	/* KDE org_kde_kwin_server_decoration — still used by GTK3 and some
+	 * GTK4 builds; without a SERVER default they freely draw CSD. */
+	struct wlr_server_decoration_manager *server_decoration_manager;
 
 	struct wlr_seat *seat;
 	struct wlr_cursor *cursor;

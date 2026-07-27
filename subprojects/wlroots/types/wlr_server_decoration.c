@@ -24,11 +24,14 @@ static void server_decoration_handle_request_mode(struct wl_client *client,
 		struct wl_resource *resource, uint32_t mode) {
 	struct wlr_server_decoration *decoration =
 		decoration_from_resource(resource);
-	if (decoration == NULL || decoration->mode == mode) {
+	if (decoration == NULL) {
 		return;
 	}
-	decoration->mode = mode;
-	wl_signal_emit_mutable(&decoration->events.mode, decoration);
+	/* Ignore client preference: keep the mode seeded from the manager
+	 * default (SERVER for SSD compositors). GTK otherwise requests CLIENT
+	 * and keeps drawing CSD shadows. */
+	(void)client;
+	(void)mode;
 	org_kde_kwin_server_decoration_send_mode(decoration->resource,
 		decoration->mode);
 }

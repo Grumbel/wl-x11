@@ -220,10 +220,27 @@ int main(int argc, char **argv) {
 	server.new_xdg_popup.notify = server_new_xdg_popup;
 	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
 
-	server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display, 1);
+	/* xdg-decoration-unstable-v1 (v2). Default path forces SERVER_SIDE so
+	 * clients must not paint CSD/shadows; --csd requests CLIENT_SIDE. */
+	server.xdg_decoration_manager =
+		wlr_xdg_decoration_manager_v1_create(server.wl_display, 2);
 	server.new_toplevel_decoration.notify = server_new_toplevel_decoration;
 	wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration,
 		&server.new_toplevel_decoration);
+
+	/* KDE server-decoration: GTK3 (and some GTK4) still prefer this over
+	 * xdg-decoration. Advertise a default mode matching --csd / SSD. */
+	server.server_decoration_manager =
+		wlr_server_decoration_manager_create(server.wl_display);
+	if (server.server_decoration_manager) {
+		wlr_server_decoration_manager_set_default_mode(
+			server.server_decoration_manager,
+			server.prefer_csd
+				? WLR_SERVER_DECORATION_MANAGER_MODE_CLIENT
+				: WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
+		wlr_log(WLR_INFO, "org_kde_kwin_server_decoration default=%s",
+			server.prefer_csd ? "client" : "server");
+	}
 
 	server.seat = wlr_seat_create(server.wl_display, "seat0");
 	server.cursor = wlr_cursor_create();

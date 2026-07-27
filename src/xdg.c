@@ -119,10 +119,11 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	/* Fit the X11 window to the client buffer. Host is always buffer-sized
-	 * so CSD shadows are not clipped. Configure still uses window geometry
-	 * when known. Grow even under size_from_wm when the buffer is larger
-	 * than the host (dialogs / unmaximize). */
+	/* Fit the X11 window:
+	 *  --csd: buffer-sized so client shadows stay visible
+	 *  SSD:   geometry-sized so leftover client shadow margins are clipped
+	 * Configure always uses window geometry when known. Grow even under
+	 * size_from_wm when the preferred size exceeds the host. */
 	if (win->output && win->toplevel) {
 		int cw = 0, ch = 0;
 		toplevel_preferred_size(win, &cw, &ch);
@@ -163,13 +164,22 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	/* Host is buffer-sized; always force (0,0) so the full surface matches
-	 * the X11 window. xdg scene defaults to (-geometry.x, -geometry.y),
-	 * which shifts content and breaks pointer hit-testing. */
+	/* Scene placement of the xdg surface within the output:
+	 *  --csd: (0,0) so the full buffer (incl. shadow) fills the host window
+	 *  SSD:   (-geometry.x, -geometry.y) so content aligns to the host and
+	 *         client-drawn shadow pixels fall outside the output and clip */
 	if (win->scene_tree) {
+		int ox = 0, oy = 0;
+		if (!win->server->prefer_csd && win->toplevel) {
+			struct wlr_box geo = win->toplevel->base->current.geometry;
+			if (geo.width > 0 && geo.height > 0) {
+				ox = -geo.x;
+				oy = -geo.y;
+			}
+		}
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &win->scene_tree->children, link) {
-			wlr_scene_node_set_position(child, 0, 0);
+			wlr_scene_node_set_position(child, ox, oy);
 		}
 	}
 
@@ -234,23 +244,43 @@ struct wlx_decoration {
 	struct wl_listener destroy;
 };
 
-void decoration_request_mode(struct wl_listener *listener, void *data) {
-	(void)listener;
-	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
-	/* Default: server-side (host WM draws the border). With --csd: client
-	 * side, and _MOTIF_WM_HINTS strips the host chrome.
-	 *
-	 * xdg-decoration can be created before the first surface commit;
-	 * set_mode schedules a configure and must wait until initialized. */
-	struct wlx_window *win = decoration->toplevel->base->data;
+/* Preferred xdg-decoration mode for this compositor instance.
+ * Without --csd we always answer SERVER_SIDE so clients (GTK) must not
+ * paint CSD chrome or in-buffer drop shadows. */
+static enum wlr_xdg_toplevel_decoration_v1_mode
+wlx_decoration_mode(struct wlx_server *server) {
+	if (server && server->prefer_csd) {
+		return WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
+	}
+	return WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE;
+}
+
+/* Apply mode now, or queue until the surface is initialized (set_mode
+ * schedules a configure and asserts the surface is ready). */
+static void
+wlx_decoration_apply_mode(struct wlr_xdg_toplevel_decoration_v1 *decoration) {
+	struct wlx_window *win = decoration->toplevel
+		? decoration->toplevel->base->data : NULL;
+	enum wlr_xdg_toplevel_decoration_v1_mode mode =
+		wlx_decoration_mode(win ? win->server : NULL);
+
 	if (win && !win->initial_configure_sent) {
 		win->pending_decoration = decoration;
+		wlr_log(WLR_DEBUG, "xdg-decoration: defer %s mode until configure",
+			mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+				? "client-side" : "server-side");
 		return;
 	}
-	bool csd = win && win->server && win->server->prefer_csd;
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration, csd
-		? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
-		: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	wlr_log(WLR_INFO, "xdg-decoration: set %s mode",
+		mode == WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+			? "client-side" : "server-side");
+	wlr_xdg_toplevel_decoration_v1_set_mode(decoration, mode);
+}
+
+void decoration_request_mode(struct wl_listener *listener, void *data) {
+	(void)listener;
+	/* Client preference is ignored: compositor policy wins (--csd or SSD). */
+	wlx_decoration_apply_mode(data);
 }
 
 void decoration_destroy(struct wl_listener *listener, void *data) {
@@ -274,27 +304,17 @@ void server_new_toplevel_decoration(struct wl_listener *listener, void *data) {
 	struct wlr_xdg_toplevel_decoration_v1 *decoration = data;
 
 	struct wlx_decoration *deco = calloc(1, sizeof(*deco));
-	if (!deco) {
+	if (deco) {
+		deco->request_mode.notify = decoration_request_mode;
+		wl_signal_add(&decoration->events.request_mode, &deco->request_mode);
+		deco->destroy.notify = decoration_destroy;
+		wl_signal_add(&decoration->events.destroy, &deco->destroy);
+	} else {
 		wlr_log(WLR_ERROR, "out of memory allocating decoration tracker");
-		return;
+		/* Still force a mode so the client is not left undecided. */
 	}
-	deco->request_mode.notify = decoration_request_mode;
-	wl_signal_add(&decoration->events.request_mode, &deco->request_mode);
-	deco->destroy.notify = decoration_destroy;
-	wl_signal_add(&decoration->events.destroy, &deco->destroy);
 
-	struct wlx_window *win = decoration->toplevel->base->data;
-	bool csd = win && win->server && win->server->prefer_csd;
-	wlr_log(WLR_INFO, "new xdg toplevel decoration -> %s mode",
-		csd ? "client-side" : "server-side");
-
-	if (win && !win->initial_configure_sent) {
-		win->pending_decoration = decoration;
-		return;
-	}
-	wlr_xdg_toplevel_decoration_v1_set_mode(decoration, csd
-		? WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
-		: WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+	wlx_decoration_apply_mode(decoration);
 }
 
 void window_new_popup(struct wl_listener *listener, void *data);

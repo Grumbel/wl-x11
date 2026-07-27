@@ -227,17 +227,27 @@ void output_destroy(struct wl_listener *listener, void *data) {
 }
 
 /* Preferred host window size (logical pixels before content_scale).
- * Always prefer the surface buffer when present so GTK/Qt CSD shadows and
- * padding are never clipped. Fall back to xdg geometry, then defaults. */
+ *
+ * --csd: use the full surface buffer so client-drawn shadows/padding are
+ * visible (host is buffer-sized).
+ *
+ * SSD (default): prefer xdg window geometry so any leftover client shadow
+ * margin is clipped by the X11 window; fall back to buffer if geometry
+ * is unset. */
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	int w = 0, h = 0;
 	if (win->toplevel && win->toplevel->base) {
+		struct wlr_box geo = win->toplevel->base->current.geometry;
 		struct wlr_surface *surf = win->toplevel->base->surface;
-		if (surf && surf->current.width > 0 && surf->current.height > 0) {
+		bool use_geo = win->server && !win->server->prefer_csd &&
+			geo.width > 0 && geo.height > 0;
+		if (use_geo) {
+			w = geo.width;
+			h = geo.height;
+		} else if (surf && surf->current.width > 0 && surf->current.height > 0) {
 			w = surf->current.width;
 			h = surf->current.height;
 		} else {
-			struct wlr_box geo = win->toplevel->base->current.geometry;
 			w = geo.width;
 			h = geo.height;
 		}
