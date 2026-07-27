@@ -170,7 +170,7 @@ void output_commit(struct wl_listener *listener, void *data) {
 				lh = 1;
 			}
 		}
-		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
+		wlx_toplevel_set_size(win, lw, lh);
 	}
 	/* Keep host WM constraints aligned with the new size / xdg min-max. */
 	win_sync_size_hints(win);
@@ -261,6 +261,18 @@ void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	*w_out = w;
 	*h_out = h;
 }
+
+void wlx_toplevel_set_size(struct wlx_window *win, int width, int height) {
+	if (!win || !win->toplevel) {
+		return;
+	}
+	wlr_xdg_toplevel_set_size(win->toplevel, width, height);
+	if (width > 0 && height > 0) {
+		win->last_client_conf_w = width;
+		win->last_client_conf_h = height;
+	}
+}
+
 
 void xwin_set_transient_for(struct wlx_server *s, xcb_window_t w,
 		xcb_window_t parent) {
@@ -724,7 +736,7 @@ void create_output_for_window(struct wlx_window *win) {
 
 	/* Do not lock the client to the first buffer size (0×0 = client picks).
 	 * Host still opens at preferred size; surface_commit grows it if needed. */
-	wlr_xdg_toplevel_set_size(win->toplevel, 0, 0);
+	wlx_toplevel_set_size(win, 0, 0);
 	wlx_apply_content_scale(win);
 
 	/* First frame only after position/hints are applied. */

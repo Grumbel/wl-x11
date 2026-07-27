@@ -296,8 +296,14 @@ struct wlx_window {
 	int csd_margin_h;
 	/* Once the host WM (or interactive resize) changes the X11 window
 	 * size we stop auto-fitting the output to the client's geometry, so
-	 * a user-enlarged window is not yanked back down on the next commit. */
+	 * a user-enlarged window is not yanked back down on the next commit.
+	 * Cleared again when the client commits a size we did not request
+	 * (client-driven resize). */
 	bool size_from_wm;
+	/* Last size we sent via wlr_xdg_toplevel_set_size (logical px). Used to
+	 * distinguish client-driven resizes from "client acked our configure". */
+	int last_client_conf_w;
+	int last_client_conf_h;
 	/* Skip scene Present after an output size change until the client
 	 * commits a new buffer, so the previous frame stays on screen. */
 	bool hold_present;
@@ -406,6 +412,8 @@ void xwin_set_size_hints(struct wlx_server *s, xcb_window_t w,
 	int max_width, int max_height);
 void win_sync_size_hints(struct wlx_window *win);
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out);
+/* set_size + record last_client_conf so surface_commit can detect client-driven resizes */
+void wlx_toplevel_set_size(struct wlx_window *win, int width, int height);
 
 /* move_resize.c */
 void begin_interactive_move(struct wlx_window *win);

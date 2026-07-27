@@ -362,7 +362,7 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 			win->output->height > 0) {
 		int lw = wlx_unscale_size(server, win->output->width);
 		int lh = wlx_unscale_size(server, win->output->height);
-		wlr_xdg_toplevel_set_size(win->toplevel, lw, lh);
+		wlx_toplevel_set_size(win, lw, lh);
 	}
 }
 
@@ -688,7 +688,7 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 								win->output->width, win->output->height);
 							resize_output_to(win, cw, ch);
 							if (win->toplevel) {
-								wlr_xdg_toplevel_set_size(win->toplevel,
+								wlx_toplevel_set_size(win,
 									wlx_unscale_size(server, cw),
 									wlx_unscale_size(server, ch));
 							}

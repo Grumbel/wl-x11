@@ -122,8 +122,11 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	/* Fit the X11 window:
 	 *  --csd: buffer-sized so client shadows stay visible
 	 *  SSD:   geometry-sized so leftover client shadow margins are clipped
-	 * Configure always uses window geometry when known. Grow even under
-	 * size_from_wm when the preferred size exceeds the host. */
+	 *
+	 * size_from_wm: host WM chose the size — do not yank the window back
+	 * when the client merely acks that configure. But if the client commits
+	 * a *different* size than we last requested (client-driven resize:
+	 * content changed, Qt adjusted itself, …), adopt it on the host. */
 	if (win->output && win->toplevel) {
 		int cw = 0, ch = 0;
 		toplevel_preferred_size(win, &cw, &ch);
@@ -136,13 +139,30 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			win->toplevel->pending.maximized ||
 			win->toplevel->current.fullscreen ||
 			win->toplevel->pending.fullscreen;
+		bool size_mismatch = out_w != win->output->width ||
+			out_h != win->output->height;
+		/* Client-driven when the committed size is not what we last asked
+		 * for. last_client_conf == 0 means we never requested a size yet
+		 * (set_size(0,0) on map) — treat a mismatch as client-chosen. */
+		bool client_driven = size_mismatch &&
+			(win->last_client_conf_w <= 0 || win->last_client_conf_h <= 0 ||
+			 conf_w != win->last_client_conf_w ||
+			 conf_h != win->last_client_conf_h);
 		bool grow = !tiled &&
 			(out_w > win->output->width || out_h > win->output->height);
-		bool fit = !win->size_from_wm &&
-			(out_w != win->output->width || out_h != win->output->height);
+		bool fit = size_mismatch &&
+			(!win->size_from_wm || client_driven);
+		if (client_driven) {
+			win->size_from_wm = false;
+			wlr_log(WLR_DEBUG, "client-driven resize %dx%d → %dx%d "
+				"(was conf %dx%d)",
+				win->last_client_conf_w, win->last_client_conf_h,
+				conf_w, conf_h, win->output->width, win->output->height);
+		}
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
-				(fit || grow)) {
-			if (grow && win->size_from_wm) {
+				(fit || grow) && !tiled) {
+			if (grow && win->size_from_wm && !client_driven) {
+				/* Only expand for CSD margins while WM still owns size. */
 				if (out_w < win->output->width) {
 					out_w = win->output->width;
 				}
@@ -156,7 +176,7 @@ void surface_commit(struct wl_listener *listener, void *data) {
 				win->csd_margin_w, win->csd_margin_h,
 				win->server->content_scale, win->server->prefer_csd);
 			resize_output_to(win, out_w, out_h);
-			wlr_xdg_toplevel_set_size(win->toplevel, conf_w, conf_h);
+			wlx_toplevel_set_size(win, conf_w, conf_h);
 			if (win->l_output) {
 				wlr_scene_node_set_position(&win->scene_tree->node,
 					win->l_output->x, win->l_output->y);
