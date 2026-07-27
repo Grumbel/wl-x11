@@ -153,18 +153,37 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		dnd_out_update_position(server);
 	}
 
+	/* Prefer the real X11 window under the pointer and its surface-local
+	 * coords. The layout cursor can be wildly wrong (enter at 1262,-66 on
+	 * an 884x391 window) because outputs are side-by-side in the layout
+	 * while X11 windows are independently placed on the host desktop. */
 	double sx = 0, sy = 0;
-	struct wlr_surface *surface = surface_at_cursor(server, &sx, &sy);
-
-	/* When the layout cursor is still on the parent output but the real
-	 * X11 pointer is over a dialog, prefer the window under the pointer. */
-	if (!surface) {
-		struct wlx_window *under = window_at_root_pointer(server);
-		if (under && under->toplevel &&
-				pointer_coords_on_window(server, under, &sx, &sy)) {
-			wlx_pointer_to_surface(server, &sx, &sy);
+	struct wlr_surface *surface = NULL;
+	struct wlx_window *under = window_at_root_pointer(server);
+	if (under && under->toplevel &&
+			pointer_coords_on_window(server, under, &sx, &sy)) {
+		wlx_pointer_to_surface(server, &sx, &sy);
+		if (under->scene_tree) {
+			double hx = sx, hy = sy;
+			struct wlr_scene_node *node = wlr_scene_node_at(
+				&under->scene_tree->node, sx, sy, &hx, &hy);
+			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
+				struct wlr_scene_buffer *buf =
+					wlr_scene_buffer_from_node(node);
+				struct wlr_scene_surface *ss =
+					wlr_scene_surface_try_from_buffer(buf);
+				if (ss) {
+					surface = ss->surface;
+					sx = hx;
+					sy = hy;
+				}
+			}
+		}
+		if (!surface) {
 			surface = under->toplevel->base->surface;
 		}
+	} else {
+		surface = surface_at_cursor(server, &sx, &sy);
 	}
 
 	struct wlr_surface *prev = server->seat->pointer_state.focused_surface;
@@ -253,7 +272,27 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 		if (win && win->toplevel &&
 				pointer_coords_on_window(server, win, &sx, &sy)) {
 			wlx_pointer_to_surface(server, &sx, &sy);
-			surface = win->toplevel->base->surface;
+			/* Hit-test within this window so subsurfaces get the button
+			 * serial GTK needs for xdg_popup.grab. */
+			if (win->scene_tree) {
+				double hx = sx, hy = sy;
+				struct wlr_scene_node *node = wlr_scene_node_at(
+					&win->scene_tree->node, sx, sy, &hx, &hy);
+				if (node && node->type == WLR_SCENE_NODE_BUFFER) {
+					struct wlr_scene_buffer *buf =
+						wlr_scene_buffer_from_node(node);
+					struct wlr_scene_surface *ss =
+						wlr_scene_surface_try_from_buffer(buf);
+					if (ss) {
+						surface = ss->surface;
+						sx = hx;
+						sy = hy;
+					}
+				}
+			}
+			if (!surface) {
+				surface = win->toplevel->base->surface;
+			}
 			set_active_window(server, win);
 			wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
 		} else {

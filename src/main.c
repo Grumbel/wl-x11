@@ -199,6 +199,11 @@ int main(int argc, char **argv) {
 	 * paste. Many clients still implement it; pure Wayland desktops may
 	 * omit it, but X11 users expect PRIMARY. */
 	wlr_primary_selection_v1_device_manager_create(server.wl_display);
+	/* GTK4/libadwaita expect these; without them menus/sizing can misbehave. */
+	wlr_viewporter_create(server.wl_display);
+	wlr_fractional_scale_manager_v1_create(server.wl_display, 1);
+	wlr_single_pixel_buffer_manager_v1_create(server.wl_display);
+	wlr_presentation_create(server.wl_display, server.backend, 2);
 
 	server.output_layout = wlr_output_layout_create(server.wl_display);
 	server.scene = wlr_scene_create();
@@ -211,6 +216,8 @@ int main(int argc, char **argv) {
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 5);
 	server.new_xdg_toplevel.notify = server_new_xdg_toplevel;
 	wl_signal_add(&server.xdg_shell->events.new_toplevel, &server.new_xdg_toplevel);
+	server.new_xdg_popup.notify = server_new_xdg_popup;
+	wl_signal_add(&server.xdg_shell->events.new_popup, &server.new_xdg_popup);
 
 	server.xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(server.wl_display, 1);
 	server.new_toplevel_decoration.notify = server_new_toplevel_decoration;
@@ -391,6 +398,7 @@ int main(int argc, char **argv) {
 	wl_display_destroy_clients(server.wl_display);
 
 	wl_list_remove(&server.new_xdg_toplevel.link);
+	wl_list_remove(&server.new_xdg_popup.link);
 	wl_list_remove(&server.new_toplevel_decoration.link);
 	wl_list_remove(&server.client_created.link);
 	wl_list_remove(&server.new_input.link);

@@ -119,11 +119,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	/* Fit the X11 window to the client until the WM/user resizes it.
-	 * SSD: xdg geometry. CSD: full buffer (shadow/resize margins).
-	 * After unmaximize, size_from_wm is cleared so shadows can expand the
-	 * host again. While size_from_wm (user/WM resize), still grow for CSD
-	 * if the client buffer is larger than the host (shadows would clip). */
+	/* Fit the X11 window to the client buffer. Host is always buffer-sized
+	 * so CSD shadows are not clipped. Configure still uses window geometry
+	 * when known. Grow even under size_from_wm when the buffer is larger
+	 * than the host (dialogs / unmaximize). */
 	if (win->output && win->toplevel) {
 		int cw = 0, ch = 0;
 		toplevel_preferred_size(win, &cw, &ch);
@@ -136,15 +135,13 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			win->toplevel->pending.maximized ||
 			win->toplevel->current.fullscreen ||
 			win->toplevel->pending.fullscreen;
-		bool has_csd = win->server->prefer_csd ||
-			win->csd_margin_w > 0 || win->csd_margin_h > 0;
-		bool grow_csd = has_csd && !tiled &&
+		bool grow = !tiled &&
 			(out_w > win->output->width || out_h > win->output->height);
 		bool fit = !win->size_from_wm &&
 			(out_w != win->output->width || out_h != win->output->height);
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
-				(fit || grow_csd)) {
-			if (grow_csd && win->size_from_wm) {
+				(fit || grow)) {
+			if (grow && win->size_from_wm) {
 				if (out_w < win->output->width) {
 					out_w = win->output->width;
 				}
@@ -166,19 +163,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	/* wlr_scene_xdg_surface places the surface tree at (-geometry.x,
-	 * -geometry.y) so geometry sits at the node origin. Correct for
-	 * geometry-sized SSD hosts. When the client draws CSD (buffer >
-	 * geometry) the host is buffer-sized — force (0,0) so shadows match
-	 * the X11 window. Same when maximized/fullscreen. */
-	bool tiled = win->toplevel &&
-		(win->toplevel->current.maximized ||
-		 win->toplevel->pending.maximized ||
-		 win->toplevel->current.fullscreen ||
-		 win->toplevel->pending.fullscreen);
-	bool has_csd = win->server->prefer_csd ||
-		win->csd_margin_w > 0 || win->csd_margin_h > 0;
-	if ((has_csd || tiled) && win->scene_tree) {
+	/* Host is buffer-sized; always force (0,0) so the full surface matches
+	 * the X11 window. xdg scene defaults to (-geometry.x, -geometry.y),
+	 * which shifts content and breaks pointer hit-testing. */
+	if (win->scene_tree) {
 		struct wlr_scene_node *child;
 		wl_list_for_each(child, &win->scene_tree->children, link) {
 			wlr_scene_node_set_position(child, 0, 0);
@@ -495,6 +483,10 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	int px = (int)root_x + wlx_scale_size(pop->server, lx);
 	int py = (int)root_y + wlx_scale_size(pop->server, ly);
 
+	wlr_log(WLR_INFO, "xdg_popup place %dx%d at root (%d,%d) "
+		"(parent root %d,%d + local %d,%d)",
+		pw, ph, px, py, (int)root_x, (int)root_y, lx, ly);
+
 	xcb_window_t xwin = wlr_x11_output_get_window(pop->output);
 	xcb_connection_t *xconn = wlr_x11_backend_get_connection(pop->server->backend);
 	if (xwin != XCB_WINDOW_NONE && xconn) {
@@ -523,7 +515,10 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 static void popup_map(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, map);
 	(void)data;
-	wlr_log(WLR_INFO, "xdg_popup map → override-redirect X11 window");
+	struct wlr_surface *surf = pop->xdg_popup->base->surface;
+	wlr_log(WLR_INFO, "xdg_popup map → OR window (buffer %dx%d)",
+		surf ? surf->current.width : 0,
+		surf ? surf->current.height : 0);
 	popup_position_and_map(pop);
 }
 
@@ -635,8 +630,36 @@ static void handle_new_xdg_popup(struct wl_listener *listener, void *data) {
 void window_new_popup(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, new_popup);
 	struct wlr_xdg_popup *xdg_popup = data;
+	if (xdg_popup->base->data) {
+		return; /* already set up via shell-level new_popup */
+	}
 	wlr_log(WLR_INFO, "xdg_popup from toplevel \"%s\" (app_id \"%s\")",
 		win->toplevel && win->toplevel->title ? win->toplevel->title : "",
 		win->toplevel && win->toplevel->app_id ? win->toplevel->app_id : "");
 	setup_popup(win->server, xdg_popup, win);
+}
+
+/* Shell-level catch-all so popups are never missed if the parent surface
+ * listener was not connected yet (or parent is an intermediate popup). */
+void server_new_xdg_popup(struct wl_listener *listener, void *data) {
+	struct wlx_server *server =
+		wl_container_of(listener, server, new_xdg_popup);
+	struct wlr_xdg_popup *xdg_popup = data;
+	/* Log before any early-return so we never miss a popup that fails setup. */
+	wlr_log(WLR_INFO, "shell new_popup (parent_surface=%p data=%p)",
+		(void *)xdg_popup->parent, (void *)xdg_popup->base->data);
+	if (xdg_popup->base->data) {
+		return; /* already set up via parent new_popup */
+	}
+	struct wlx_window *parent = popup_find_toplevel_window(xdg_popup);
+	if (!parent) {
+		wlr_log(WLR_ERROR, "shell new_popup: no parent toplevel "
+			"(parent_surface=%p) — popup will not get an OR window",
+			(void *)xdg_popup->parent);
+		return;
+	}
+	wlr_log(WLR_INFO, "xdg_popup (shell) parent app_id \"%s\"",
+		parent->toplevel && parent->toplevel->app_id ?
+			parent->toplevel->app_id : "");
+	setup_popup(server, xdg_popup, parent);
 }

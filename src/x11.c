@@ -642,12 +642,10 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 				dnd_set_xdnd_aware(server, win->xwin);
 				dnd_set_xdnd_aware(server, win->content_xwin);
 				apply_transient_hints(win);
-				if (server->prefer_csd) {
-					xwin_set_motif_decorations(server, win->xwin, false);
-					if (win->content_xwin != XCB_WINDOW_NONE) {
-						xwin_set_motif_decorations(server,
-							win->content_xwin, false);
-					}
+				xwin_set_motif_decorations(server, win->xwin, false);
+				if (win->content_xwin != XCB_WINDOW_NONE) {
+					xwin_set_motif_decorations(server,
+						win->content_xwin, false);
 				}
 			}
 		} else if (type == XCB_CONFIGURE_NOTIFY) {

@@ -34,6 +34,10 @@
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_viewporter.h>
+#include <wlr/types/wlr_fractional_scale_v1.h>
+#include <wlr/types/wlr_single_pixel_buffer_v1.h>
+#include <wlr/types/wlr_presentation_time.h>
 #include <wlr/util/edges.h>
 #include <wlr/util/log.h>
 
@@ -82,6 +86,7 @@ struct wlx_server {
 
 	struct wlr_xdg_shell *xdg_shell;
 	struct wl_listener new_xdg_toplevel;
+	struct wl_listener new_xdg_popup; /* shell-level: all popups */
 
 	struct wlr_xdg_decoration_manager_v1 *xdg_decoration_manager;
 	struct wl_listener new_toplevel_decoration;
@@ -399,6 +404,7 @@ void resize_output_to(struct wlx_window *win, int w, int h);
 
 /* xdg.c */
 void server_new_xdg_toplevel(struct wl_listener *listener, void *data);
+void server_new_xdg_popup(struct wl_listener *listener, void *data);
 void server_new_toplevel_decoration(struct wl_listener *listener, void *data);
 
 /* input.c */

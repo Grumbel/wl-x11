@@ -227,26 +227,19 @@ void output_destroy(struct wl_listener *listener, void *data) {
 }
 
 /* Preferred host window size (logical pixels before content_scale).
- * When the client draws CSD (buffer larger than window geometry) — either
- * because of --csd or because GTK/Qt did so anyway — use the full buffer
- * so shadows/padding are not clipped. Otherwise use xdg geometry. */
+ * Always prefer the surface buffer when present so GTK/Qt CSD shadows and
+ * padding are never clipped. Fall back to xdg geometry, then defaults. */
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out) {
 	int w = 0, h = 0;
 	if (win->toplevel && win->toplevel->base) {
 		struct wlr_surface *surf = win->toplevel->base->surface;
-		bool csd = (win->server && win->server->prefer_csd) ||
-			win->csd_margin_w > 0 || win->csd_margin_h > 0;
-		if (csd && surf && surf->current.width > 0 && surf->current.height > 0) {
+		if (surf && surf->current.width > 0 && surf->current.height > 0) {
 			w = surf->current.width;
 			h = surf->current.height;
 		} else {
 			struct wlr_box geo = win->toplevel->base->current.geometry;
 			w = geo.width;
 			h = geo.height;
-			if ((w <= 0 || h <= 0) && surf) {
-				w = surf->current.width;
-				h = surf->current.height;
-			}
 		}
 	}
 	if (w < WLX_MIN_OUTPUT_SIZE) {
@@ -525,23 +518,8 @@ bool pointer_coords_on_window(struct wlx_server *server,
 	*sy = (double)tr->dst_y;
 	free(tr);
 
-	/* X11 content window top-left is the window-geometry origin for SSD
-	 * hosts (window sized to geometry). Surface-local coords include any
-	 * CSD/shadow offset inside the buffer: surface = window + geometry.xy.
-	 * With --csd the host is buffer-sized and the scene is forced to
-	 * (0,0), so window coords already match the surface. Same when
-	 * maximized/fullscreen (no shadow; geometry origin is 0,0). */
-	bool tiled = win->toplevel->current.maximized ||
-		win->toplevel->pending.maximized ||
-		win->toplevel->current.fullscreen ||
-		win->toplevel->pending.fullscreen;
-	if (!server->prefer_csd && !tiled) {
-		struct wlr_box geo = win->toplevel->base->current.geometry;
-		if (geo.width > 0 && geo.height > 0) {
-			*sx += (double)geo.x;
-			*sy += (double)geo.y;
-		}
-	}
+	/* Host is buffer-sized and the scene is forced to (0,0), so X11
+	 * window-local coords already match surface-local coords. */
 	return true;
 }
 
@@ -617,10 +595,10 @@ void create_output_for_window(struct wlx_window *win) {
 		apply_transient_hints(win);
 		xwin_set_title(server, win->xwin, win->toplevel->title);
 		xwin_set_class(server, win->xwin, win->toplevel->app_id);
-		/* --csd: strip host title/border so the client draws chrome. */
-		if (server->prefer_csd) {
-			xwin_set_motif_decorations(server, win->xwin, false);
-		}
+		/* Strip host title/border. GTK/Qt draw their own chrome; host
+		 * decorations shrink the content window (e.g. 531x203 → ~531x176)
+		 * and clip dialog bottoms. */
+		xwin_set_motif_decorations(server, win->xwin, false);
 		/* Size hints before MapWindow (no position flags). last_* not set
 		 * yet — pass preferred size via a temporary so win_sync works. */
 		win->last_output_width = want_w > 0 ? want_w : output->width;
@@ -638,9 +616,7 @@ void create_output_for_window(struct wlx_window *win) {
 			apply_transient_hints(win);
 			xwin_set_title(server, win->content_xwin, win->toplevel->title);
 			xwin_set_class(server, win->content_xwin, win->toplevel->app_id);
-			if (server->prefer_csd) {
-				xwin_set_motif_decorations(server, win->content_xwin, false);
-			}
+			xwin_set_motif_decorations(server, win->content_xwin, false);
 			win_sync_size_hints(win);
 			dnd_set_xdnd_aware(server, win->content_xwin);
 			if (server->xcb) {
@@ -698,27 +674,9 @@ void create_output_for_window(struct wlx_window *win) {
 	win->output_request_state.notify = output_request_state;
 	wl_signal_add(&output->events.request_state, &win->output_request_state);
 
-	{
-		int conf_w = wlx_unscale_size(server, output->width);
-		int conf_h = wlx_unscale_size(server, output->height);
-		if (server->prefer_csd && win->toplevel) {
-			struct wlr_box geo = win->toplevel->base->current.geometry;
-			if (geo.width > 0 && geo.height > 0) {
-				conf_w = geo.width;
-				conf_h = geo.height;
-			} else {
-				conf_w -= win->csd_margin_w;
-				conf_h -= win->csd_margin_h;
-				if (conf_w < 1) {
-					conf_w = 1;
-				}
-				if (conf_h < 1) {
-					conf_h = 1;
-				}
-			}
-		}
-		wlr_xdg_toplevel_set_size(win->toplevel, conf_w, conf_h);
-	}
+	/* Do not lock the client to the first buffer size (0×0 = client picks).
+	 * Host still opens at preferred size; surface_commit grows it if needed. */
+	wlr_xdg_toplevel_set_size(win->toplevel, 0, 0);
 	wlx_apply_content_scale(win);
 
 	/* First frame only after position/hints are applied. */
