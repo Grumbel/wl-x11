@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <linux/input-event-codes.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -560,6 +561,60 @@ void set_active_window(struct wlx_server *server, struct wlx_window *win) {
 	}
 }
 
+
+static bool xcb_event_on_popup_present(struct wlx_server *server, xcb_window_t w) {
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &server->popups, link) {
+		if (pop->xpresent &&
+				wlr_x11_present_window_get_xcb(pop->xpresent) == w) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Core pointer events delivered during XGrabPointer (owner_events=false).
+ * Drive the seat the same way XI2 motion/button would. */
+static void handle_core_pointer_during_grab(struct wlx_server *server,
+		uint8_t type, xcb_generic_event_t *event) {
+	if (type == XCB_MOTION_NOTIFY) {
+		xcb_motion_notify_event_t *ev = (xcb_motion_notify_event_t *)event;
+		process_cursor_motion(server, ev->time);
+		/* Clients (Qt) apply hover/highlight on wl_pointer.frame, not on
+		 * motion alone. XI2 path emits frame from the backend; core grab
+		 * path must do the same. */
+		wlr_seat_pointer_notify_frame(server->seat);
+		return;
+	}
+	if (type == XCB_BUTTON_PRESS || type == XCB_BUTTON_RELEASE) {
+		xcb_button_press_event_t *ev = (xcb_button_press_event_t *)event;
+		uint32_t button = 0;
+		switch (ev->detail) {
+		case 1: button = BTN_LEFT; break;
+		case 2: button = BTN_MIDDLE; break;
+		case 3: button = BTN_RIGHT; break;
+		default:
+			return; /* wheel etc. — ignore for grab dismiss */
+		}
+		enum wlr_button_state state = (type == XCB_BUTTON_PRESS)
+			? WLR_BUTTON_PRESSED : WLR_BUTTON_RELEASED;
+		if (state == WLR_BUTTON_PRESSED) {
+			pointer_enter_surface_under_cursor(server);
+			wlr_seat_pointer_notify_button(server->seat, ev->time,
+				button, state);
+		} else {
+			wlr_seat_pointer_notify_button(server->seat, ev->time,
+				button, state);
+			pointer_enter_surface_under_cursor(server);
+			if (server->popup_pointer_grab_pending &&
+					server->seat->pointer_state.button_count == 0) {
+				wlx_popup_update_pointer_grab(server);
+			}
+		}
+		wlr_seat_pointer_notify_frame(server->seat);
+	}
+}
+
 int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	(void)fd;
 	(void)mask;
@@ -568,6 +623,14 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 	xcb_generic_event_t *event;
 	while ((event = xcb_poll_for_event(server->xcb)) != NULL) {
 		uint8_t type = event->response_type & ~0x80;
+		/* Core pointer path while XGrabPointer is active (menu open). */
+		if (server->popup_pointer_grabbed &&
+				(type == XCB_BUTTON_PRESS || type == XCB_BUTTON_RELEASE ||
+				 type == XCB_MOTION_NOTIFY)) {
+			handle_core_pointer_during_grab(server, type, event);
+			free(event);
+			continue;
+		}
 		if (type == XCB_FOCUS_IN) {
 			xcb_focus_in_event_t *fi = (xcb_focus_in_event_t *)event;
 			/* Ignore grab transitions and pointer-only notifies; keep

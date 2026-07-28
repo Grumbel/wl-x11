@@ -623,18 +623,16 @@ void wlx_dismiss_all_popups(struct wlx_server *server) {
 }
 
 
-/* X11 menus: active XI2 pointer grab (not core XGrabPointer).
+/* Classic X11 menu grab: XGrabPointer on the OR menu window.
  *
- * wlroots' X11 backend delivers input via XI2 only. A core GrabPointer
- * succeeds but freezes/breaks that path — menus then get no motion.
- * Toolkits (GTK/Qt on X11) grab the XI2 master pointer instead.
+ * The wlroots X11 backend normally delivers input via XI2 only. During an
+ * active core grab with owner_events=false, the X server reports pointer
+ * events as core events on grab_win instead. present_window selects core
+ * ButtonPress/Motion; the compositor handles them in x11.c and drives the
+ * seat (hit-test still uses root query_pointer). That is how ordinary X11
+ * toolkits get outside clicks without focus hacks.
  *
- * owner_events=false: every pointer event goes to grab_win (the OR menu).
- * The compositor still hit-tests with root query_pointer, so both in-menu
- * motion and outside clicks reach the seat through the present-window.
- *
- * Defer while a button is held: the implicit button grab returns
- * AlreadyGrabbed until the opening click is released. */
+ * Defer while a button is held (implicit grab → AlreadyGrabbed). */
 void wlx_popup_update_pointer_grab(struct wlx_server *server) {
 	if (!server || !server->xcb || xcb_connection_has_error(server->xcb)) {
 		return;
@@ -657,11 +655,10 @@ void wlx_popup_update_pointer_grab(struct wlx_server *server) {
 
 	if (!want) {
 		if (server->popup_pointer_grabbed) {
-			xcb_input_xi_ungrab_device(server->xcb,
-				XCB_INPUT_DEVICE_ALL_MASTER, XCB_CURRENT_TIME);
+			xcb_ungrab_pointer(server->xcb, XCB_CURRENT_TIME);
 			xcb_flush(server->xcb);
 			server->popup_pointer_grabbed = false;
-			wlr_log(WLR_DEBUG, "xdg_popup: XI2 pointer ungrab (no menus)");
+			wlr_log(WLR_DEBUG, "xdg_popup: XUngrabPointer");
 		}
 		server->popup_pointer_grab_pending = false;
 		return;
@@ -673,7 +670,7 @@ void wlx_popup_update_pointer_grab(struct wlx_server *server) {
 
 	if (server->seat && server->seat->pointer_state.button_count > 0) {
 		server->popup_pointer_grab_pending = true;
-		wlr_log(WLR_DEBUG, "xdg_popup: defer XI2 grab until button release");
+		wlr_log(WLR_DEBUG, "xdg_popup: defer XGrabPointer until button release");
 		return;
 	}
 
@@ -681,37 +678,34 @@ void wlx_popup_update_pointer_grab(struct wlx_server *server) {
 		return;
 	}
 
-	uint32_t mask =
-		XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
-		XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE |
-		XCB_INPUT_XI_EVENT_MASK_MOTION;
-
-	xcb_input_xi_grab_device_cookie_t cookie = xcb_input_xi_grab_device(
+	xcb_grab_pointer_cookie_t cookie = xcb_grab_pointer(
 		server->xcb,
-		XCB_INPUT_DEVICE_ALL_MASTER,
-		XCB_CURRENT_TIME,
+		false, /* owner_events: all pointer events → grab_win as core events */
 		grab_win,
-		XCB_CURSOR_NONE,
-		XCB_INPUT_GRAB_MODE_22_ASYNC,
-		XCB_INPUT_GRAB_MODE_22_ASYNC,
-		false, /* owner_events */
-		1,
-		&mask);
-	xcb_input_xi_grab_device_reply_t *reply =
-		xcb_input_xi_grab_device_reply(server->xcb, cookie, NULL);
+		XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
+			XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_ENTER_WINDOW |
+			XCB_EVENT_MASK_LEAVE_WINDOW,
+		XCB_GRAB_MODE_ASYNC,
+		XCB_GRAB_MODE_ASYNC,
+		XCB_NONE,
+		XCB_NONE,
+		XCB_CURRENT_TIME);
+	xcb_grab_pointer_reply_t *reply =
+		xcb_grab_pointer_reply(server->xcb, cookie, NULL);
 	if (reply && reply->status == XCB_GRAB_STATUS_SUCCESS) {
 		server->popup_pointer_grabbed = true;
 		server->popup_pointer_grab_pending = false;
-		wlr_log(WLR_INFO, "xdg_popup: XI2 pointer grab on 0x%x", grab_win);
+		wlr_log(WLR_INFO, "xdg_popup: XGrabPointer on 0x%x", grab_win);
+		/* Sync seat focus to whatever is under the pointer now that the
+		 * grab is active and core motion will drive the seat. */
+		wlx_pointer_refresh_focus(server);
 	} else {
-		server->popup_pointer_grab_pending = true;
-		wlr_log(WLR_INFO, "xdg_popup: XI2 grab failed (status=%d), will retry",
+		server->popup_pointer_grab_pending = false;
+		wlr_log(WLR_ERROR, "xdg_popup: XGrabPointer status=%d",
 			reply ? (int)reply->status : -1);
 	}
 	free(reply);
 }
-
-
 
 /* Present-window placement: OR X11 window in root space so menus are not
  * clipped by the parent. Scene tree is parked off-layout so parent

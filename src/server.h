@@ -130,6 +130,8 @@ struct wlx_server {
 	bool popup_pointer_grabbed;
 	/* Grab was deferred until the opening button is released. */
 	bool popup_pointer_grab_pending;
+	/* XI2 master pointer device id for grabs; 0 = unknown. */
+	uint16_t xi_master_pointer_id;
 	struct wlx_window *focused_window;
 
 	/* Deferred pointer button release: held briefly so the client can
@@ -460,6 +462,7 @@ void server_cursor_frame(struct wl_listener *listener, void *data);
 void server_seat_request_cursor(struct wl_listener *listener, void *data);
 struct wlr_surface *surface_at_cursor(struct wlx_server *server, double *sx, double *sy);
 void process_cursor_motion(struct wlx_server *server, uint32_t time_msec);
+struct wlr_surface *pointer_enter_surface_under_cursor(struct wlx_server *server);
 void reset_cursor_to_default(struct wlx_server *server);
 
 /* clipboard.c */
