@@ -648,73 +648,65 @@ static void popup_render_iterator(struct wlr_scene_buffer *scene_buffer,
 	wlr_texture_destroy(texture);
 }
 
-static const struct wlr_drm_format *popup_pick_argb_format(
-		struct wlx_server *server) {
-	static const uint32_t caps[] = {
-		WLR_BUFFER_CAP_DMABUF,
-		WLR_BUFFER_CAP_SHM,
-	};
-	for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
-		const struct wlr_drm_format_set *set =
-			wlr_renderer_get_texture_formats(server->renderer, caps[i]);
-		if (!set) {
-			continue;
-		}
-		const struct wlr_drm_format *fmt =
-			wlr_drm_format_set_get(set, DRM_FORMAT_ARGB8888);
-		if (fmt) {
-			return fmt;
-		}
-	}
-	return NULL;
-}
-
 static bool popup_render_and_present(struct wlx_popup *pop) {
 	if (!pop || !pop->xpresent || !pop->scene_tree || !pop->server) {
 		return false;
 	}
 	struct wlx_server *server = pop->server;
 	int32_t width = 0, height = 0;
+	int16_t root_x = 0, root_y = 0;
 	wlr_x11_present_window_get_geometry(pop->xpresent,
-		NULL, NULL, &width, &height);
+		&root_x, &root_y, &width, &height);
 	if (width < 1 || height < 1) {
 		return false;
 	}
 
-	/* Fast path: no content scale and a single client buffer of matching size. */
 	struct wlr_surface *surf = pop->xdg_popup && pop->xdg_popup->base
 		? pop->xdg_popup->base->surface : NULL;
-	double scale = server->content_scale > 0.0 ? server->content_scale : 1.0;
-	if (scale == 1.0 && surf && surf->buffer &&
-			surf->buffer->base.width == width &&
-			surf->buffer->base.height == height) {
-		return wlr_x11_present_window_present(pop->xpresent,
-			&surf->buffer->base);
+
+	/* Match present-window size to the client buffer (Present requires it). */
+	if (surf && surf->buffer) {
+		int bw = surf->buffer->base.width;
+		int bh = surf->buffer->base.height;
+		if (bw > 0 && bh > 0 && (bw != width || bh != height)) {
+			wlr_x11_present_window_configure(pop->xpresent,
+				root_x, root_y, bw, bh);
+			width = bw;
+			height = bh;
+			pop->root_w = bw;
+			pop->root_h = bh;
+		}
+		/* Direct Present of the client buffer (same path as toplevels). */
+		if (bw == width && bh == height) {
+			if (wlr_x11_present_window_present(pop->xpresent,
+					&surf->buffer->base)) {
+				return true;
+			}
+			wlr_log(WLR_INFO, "xdg_popup: client-buffer present failed "
+				"(%dx%d, likely format/stride) — compositing", bw, bh);
+		}
 	}
 
-	const struct wlr_drm_format *fmt = popup_pick_argb_format(server);
+	/* Composite scene → buffer in the X11 backend's Present format. */
+	const struct wlr_drm_format *fmt =
+		wlr_x11_backend_get_buffer_format(server->backend);
 	if (!fmt || !server->allocator || !server->renderer) {
-		/* Fall back to client buffer even if size differs slightly. */
-		if (surf && surf->buffer) {
-			return wlr_x11_present_window_present(pop->xpresent,
-				&surf->buffer->base);
-		}
+		wlr_log(WLR_ERROR, "xdg_popup: no X11 buffer format/allocator");
 		return false;
 	}
 
 	struct wlr_buffer *buf = wlr_allocator_create_buffer(
 		server->allocator, width, height, fmt);
 	if (!buf) {
-		if (surf && surf->buffer) {
-			return wlr_x11_present_window_present(pop->xpresent,
-				&surf->buffer->base);
-		}
+		wlr_log(WLR_ERROR, "xdg_popup: allocator_create_buffer %dx%d failed",
+			width, height);
 		return false;
 	}
 
 	struct wlr_render_pass *pass = wlr_renderer_begin_buffer_pass(
 		server->renderer, buf, NULL);
 	if (!pass) {
+		wlr_log(WLR_ERROR, "xdg_popup: begin_buffer_pass failed");
 		wlr_buffer_drop(buf);
 		return false;
 	}
@@ -737,11 +729,16 @@ static bool popup_render_and_present(struct wlx_popup *pop) {
 		popup_render_iterator, &rd);
 
 	if (!wlr_render_pass_submit(pass)) {
+		wlr_log(WLR_ERROR, "xdg_popup: render_pass_submit failed");
 		wlr_buffer_drop(buf);
 		return false;
 	}
 
 	bool ok = wlr_x11_present_window_present(pop->xpresent, buf);
+	if (!ok) {
+		wlr_log(WLR_ERROR, "xdg_popup: composited present failed (%dx%d)",
+			width, height);
+	}
 	wlr_buffer_drop(buf);
 	return ok;
 }
@@ -769,22 +766,25 @@ static bool popup_compute_root_placement(struct wlx_popup *pop,
 		return false;
 	}
 
+	/* Position from xdg geometry; size from the surface/buffer so Present
+	 * matches the client buffer (geometry size can differ). */
 	int lx = xdg->current.geometry.x;
 	int ly = xdg->current.geometry.y;
-	int lw = xdg->current.geometry.width;
-	int lh = xdg->current.geometry.height;
-	if (lw <= 0 || lh <= 0) {
+	if (lx == 0 && ly == 0 &&
+			(xdg->scheduled.geometry.x != 0 || xdg->scheduled.geometry.y != 0)) {
 		lx = xdg->scheduled.geometry.x;
 		ly = xdg->scheduled.geometry.y;
-		lw = xdg->scheduled.geometry.width;
-		lh = xdg->scheduled.geometry.height;
 	}
 	struct wlr_surface *surf = xdg->base->surface;
-	if (lw <= 0 && surf) {
-		lw = surf->current.width;
+	int lw = surf ? surf->current.width : 0;
+	int lh = surf ? surf->current.height : 0;
+	if (lw <= 0) {
+		lw = xdg->current.geometry.width > 0
+			? xdg->current.geometry.width : xdg->scheduled.geometry.width;
 	}
-	if (lh <= 0 && surf) {
-		lh = surf->current.height;
+	if (lh <= 0) {
+		lh = xdg->current.geometry.height > 0
+			? xdg->current.geometry.height : xdg->scheduled.geometry.height;
 	}
 	if (lw <= 0 || lh <= 0) {
 		return false;
@@ -838,6 +838,7 @@ static bool popup_compute_root_placement(struct wlx_popup *pop,
 	return true;
 }
 
+
 static void popup_position_and_map(struct wlx_popup *pop) {
 	struct wlx_window *parent = pop->parent;
 	if (!parent || !pop->scene_tree || !pop->server) {
@@ -847,7 +848,7 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	int16_t root_x = 0, root_y = 0;
 	int32_t width = 1, height = 1;
 	if (!popup_compute_root_placement(pop, &root_x, &root_y, &width, &height)) {
-		wlr_log(WLR_DEBUG, "xdg_popup: cannot compute root placement yet");
+		wlr_log(WLR_INFO, "xdg_popup: cannot compute root placement yet");
 		return;
 	}
 
@@ -891,6 +892,18 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 		popup_attach_xpresent_listeners(pop);
 	}
 
+	/* Prefer client buffer pixel size when available so Present matches. */
+	struct wlr_surface *surf = pop->xdg_popup && pop->xdg_popup->base
+		? pop->xdg_popup->base->surface : NULL;
+	if (surf && surf->buffer) {
+		int bw = surf->buffer->base.width;
+		int bh = surf->buffer->base.height;
+		if (bw > 0 && bh > 0) {
+			width = bw;
+			height = bh;
+		}
+	}
+
 	wlr_x11_present_window_configure(pop->xpresent,
 		root_x, root_y, width, height);
 	wlr_x11_present_window_map(pop->xpresent);
@@ -902,7 +915,8 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 	pop->root_box_valid = true;
 
 	if (!popup_render_and_present(pop)) {
-		wlr_log(WLR_DEBUG, "xdg_popup: present failed (%dx%d at %d,%d)",
+		wlr_log(WLR_ERROR, "xdg_popup: present failed (%dx%d at %d,%d) — "
+			"OR window mapped but empty; will retry on next commit",
 			width, height, root_x, root_y);
 	} else {
 		wlr_log(WLR_INFO, "xdg_popup present-window %dx%d at root (%d,%d)",
@@ -1019,6 +1033,7 @@ static void popup_commit(struct wl_listener *listener, void *data) {
 static void popup_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, destroy);
 	(void)data;
+	struct wlx_server *server = pop->server;
 	popup_destroy_xpresent(pop);
 	if (pop->scene_tree) {
 		wlr_scene_node_destroy(&pop->scene_tree->node);

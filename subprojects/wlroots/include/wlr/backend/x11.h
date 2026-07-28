@@ -11,6 +11,7 @@
 
 struct wlr_input_device;
 struct wlr_buffer;
+struct wlr_drm_format;
 
 /**
  * Creates a new X11 backend. This backend will be created with no outputs;
@@ -72,6 +73,14 @@ xcb_window_t wlr_x11_output_get_window(struct wlr_output *output);
  * not an X11 backend.
  */
 xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend);
+
+/**
+ * DRM format suitable for buffers that will be Presented to X11 windows
+ * (outputs or present-windows). Prefer DRI3 modifiers; falls back to SHM.
+ * Returns NULL if the backend is not X11 or formats are unavailable.
+ */
+const struct wlr_drm_format *wlr_x11_backend_get_buffer_format(
+	struct wlr_backend *backend);
 
 /**
  * Listen for a host-WM close request (WM_DELETE_WINDOW) on an X11 output.

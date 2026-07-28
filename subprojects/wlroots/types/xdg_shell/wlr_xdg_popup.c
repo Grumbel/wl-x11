@@ -93,24 +93,13 @@ static uint32_t xdg_pointer_grab_button(struct wlr_seat_pointer_grab *grab,
 	 * The opening click is almost always press-on-parent + release-on-parent
 	 * (same wl_client as the menu). Delivering that release to the parent
 	 * makes Qt treat it as "click outside" and destroy the popup before it
-	 * is painted. Presses outside still dismiss via the failed-send path. */
+	 * is painted. */
 	if (state == WL_POINTER_BUTTON_STATE_RELEASED &&
 			!surface_is_grab_popup(popup_grab, focus)) {
 		wlr_log(WLR_DEBUG, "xdg popup grab: swallowing release (focus not on popup)");
 		return 0;
 	}
 
-	uint32_t serial =
-		wlr_seat_pointer_send_button(grab->seat, time, button, state);
-	if (serial) {
-		return serial;
-	}
-	/* Failed press (no focused surface of this client) → click outside.
-	 * Exception: while any grab popup is still unmapped / just mapped, X11
-	 * often synthesizes a ButtonPress on the new OR window under a held
-	 * click. Treating that as "click outside" dismisses the menu instantly.
-	 * Only dismiss once every grabbed popup is mapped and the opening
-	 * button is no longer held. */
 	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
 		struct wlr_xdg_popup *popup;
 		bool any_unmapped = false;
@@ -120,23 +109,31 @@ static uint32_t xdg_pointer_grab_button(struct wlr_seat_pointer_grab *grab,
 				break;
 			}
 		}
+		/* Map under held button: ignore until every grabbed popup is mapped. */
 		if (any_unmapped) {
-			wlr_log(WLR_INFO, "xdg popup grab: ignoring failed press "
+			wlr_log(WLR_INFO, "xdg popup grab: ignoring press "
 				"(popup not mapped yet — likely X11 map under held button)");
 			return 0;
 		}
-		/* button_count already includes this press (notify_button updates
-		 * it first). count > 1 ⇒ another button was already held. */
+		/* button_count already includes this press. count > 1 ⇒ opening
+		 * button still held (press on parent opened the menu). */
 		if (grab->seat->pointer_state.button_count > 1) {
-			wlr_log(WLR_INFO, "xdg popup grab: ignoring failed press "
+			wlr_log(WLR_INFO, "xdg popup grab: ignoring press "
 				"(opening button still held, count=%zu)",
 				grab->seat->pointer_state.button_count);
 			return 0;
 		}
-		wlr_log(WLR_INFO, "xdg popup grab: failed press → dismiss (click outside)");
-		xdg_popup_grab_end(popup_grab);
+		/* Click outside the popup tree: parent toplevel of the same client
+		 * still receives send_button successfully, so "failed serial" is not
+		 * enough — dismiss whenever focus is not a grabbed popup surface. */
+		if (!surface_is_grab_popup(popup_grab, focus)) {
+			wlr_log(WLR_INFO, "xdg popup grab: press outside popup → dismiss");
+			xdg_popup_grab_end(popup_grab);
+			return 0;
+		}
 	}
-	return 0;
+
+	return wlr_seat_pointer_send_button(grab->seat, time, button, state);
 }
 
 static void xdg_pointer_grab_axis(struct wlr_seat_pointer_grab *grab,

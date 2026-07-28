@@ -115,6 +115,56 @@ static struct wlr_x11_touchpoint *get_touchpoint_from_x11_touch_id(
 	return NULL;
 }
 
+/* Prefer a real-sized output when synthesizing seat events for present-
+ * windows (bootstrap is 1×1 / off-layout and makes absolute motion useless). */
+static struct wlr_x11_output *x11_pick_seat_output(struct wlr_x11_backend *x11) {
+	struct wlr_x11_output *output;
+	struct wlr_x11_output *fallback = NULL;
+	wl_list_for_each(output, &x11->outputs, link) {
+		if (output->wlr_output.width >= 32 && output->wlr_output.height >= 32) {
+			return output;
+		}
+		if (!fallback) {
+			fallback = output;
+		}
+	}
+	return fallback;
+}
+
+/* Resolve the output that owns this event window, or — for present-windows —
+ * a seat-capable output. Present-windows are not wlr_outputs; the compositor
+ * hit-tests with root query_pointer and only needs the event to reach the seat. */
+static struct wlr_x11_output *output_for_event_window(struct wlr_x11_backend *x11,
+		xcb_window_t event_win) {
+	struct wlr_x11_output *output = get_x11_output_from_window_id(x11, event_win);
+	if (output) {
+		return output;
+	}
+	if (!get_x11_present_window_from_window_id(x11, event_win)) {
+		return NULL;
+	}
+	return x11_pick_seat_output(x11);
+}
+
+/* Motion on a present-window must NOT use motion_absolute: event_x/y are
+ * relative to the OR window, while absolute path divides by a different
+ * output's size and warps wlr_cursor off the menu. Emit relative motion
+ * with zero delta so the compositor still runs process_cursor_motion and
+ * re-queries the real root pointer for hit-testing. */
+static void send_present_window_motion(struct wlr_x11_output *output,
+		xcb_timestamp_t time) {
+	struct wlr_pointer_motion_event ev = {
+		.pointer = &output->pointer,
+		.time_msec = time,
+		.delta_x = 0,
+		.delta_y = 0,
+		.unaccel_dx = 0,
+		.unaccel_dy = 0,
+	};
+	wl_signal_emit_mutable(&output->pointer.events.motion, &ev);
+	wl_signal_emit_mutable(&output->pointer.events.frame, &output->pointer);
+}
+
 void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 		xcb_ge_generic_event_t *event) {
 	struct wlr_x11_output *output;
@@ -148,7 +198,7 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 		xcb_input_button_press_event_t *ev =
 			(xcb_input_button_press_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}
@@ -181,7 +231,7 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 		xcb_input_button_release_event_t *ev =
 			(xcb_input_button_release_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}
@@ -207,20 +257,24 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 	case XCB_INPUT_MOTION: {
 		xcb_input_motion_event_t *ev = (xcb_input_motion_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}
 
-		send_pointer_position_event(output, ev->event_x >> 16,
-			ev->event_y >> 16, ev->time);
+		if (get_x11_present_window_from_window_id(x11, ev->event)) {
+			send_present_window_motion(output, ev->time);
+		} else {
+			send_pointer_position_event(output, ev->event_x >> 16,
+				ev->event_y >> 16, ev->time);
+		}
 		x11->time = ev->time;
 		break;
 	}
 	case XCB_INPUT_TOUCH_BEGIN: {
 		xcb_input_touch_begin_event_t *ev = (xcb_input_touch_begin_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}
@@ -250,7 +304,7 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 	case XCB_INPUT_TOUCH_END: {
 		xcb_input_touch_end_event_t *ev = (xcb_input_touch_end_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}
@@ -270,7 +324,7 @@ void handle_x11_xinput_event(struct wlr_x11_backend *x11,
 	case XCB_INPUT_TOUCH_UPDATE: {
 		xcb_input_touch_update_event_t *ev = (xcb_input_touch_update_event_t *)event;
 
-		output = get_x11_output_from_window_id(x11, ev->event);
+		output = output_for_event_window(x11, ev->event);
 		if (!output) {
 			return;
 		}

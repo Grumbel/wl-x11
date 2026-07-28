@@ -50,6 +50,10 @@ struct wlr_x11_present_window *wlr_x11_present_window_create(
 		XCB_CW_BIT_GRAVITY | XCB_CW_WIN_GRAVITY | XCB_CW_BACKING_STORE |
 		XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP |
 		XCB_CW_CURSOR;
+	/* Cursor None = server default arrow (transparent_cursor made the
+	 * pointer disappear while hovering menus). Client-set cursors are
+	 * applied via wlr_x11_present_window_set_cursor when the seat focuses
+	 * a popup surface. */
 	uint32_t values[] = {
 		0, /* back_pixel */
 		0, /* border_pixel */
@@ -59,7 +63,7 @@ struct wlr_x11_present_window *wlr_x11_present_window_create(
 		1, /* override_redirect */
 		XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY,
 		x11->colormap,
-		x11->transparent_cursor,
+		XCB_CURSOR_NONE,
 	};
 
 	win->win = xcb_generate_id(x11->xcb);

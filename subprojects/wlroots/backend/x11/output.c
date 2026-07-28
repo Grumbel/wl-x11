@@ -803,6 +803,24 @@ xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend) {
 	return x11->xcb;
 }
 
+const struct wlr_drm_format *wlr_x11_backend_get_buffer_format(
+		struct wlr_backend *backend) {
+	if (!wlr_backend_is_x11(backend)) {
+		return NULL;
+	}
+	struct wlr_x11_backend *x11 = get_x11_backend_from_backend(backend);
+	if (!x11->x11_format) {
+		return NULL;
+	}
+	const struct wlr_drm_format *fmt =
+		wlr_drm_format_set_get(&x11->dri3_formats, x11->x11_format->drm);
+	if (fmt) {
+		return fmt;
+	}
+	return wlr_drm_format_set_get(&x11->shm_formats, x11->x11_format->drm);
+}
+
+
 void handle_x11_present_event(struct wlr_x11_backend *x11,
 		xcb_ge_generic_event_t *event) {
 	struct wlr_x11_output *output;
