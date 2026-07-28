@@ -14,13 +14,17 @@
 #include <time.h>
 #include <math.h>
 
-#include <drm_fourcc.h>
-
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
 #include <wlr/render/drm_format_set.h>
+#include <wlr/util/transform.h>
+
+/* Avoid a hard libdrm dependency just for one fourcc (little-endian AR24). */
+#ifndef DRM_FORMAT_ARGB8888
+#define DRM_FORMAT_ARGB8888 0x34325241
+#endif
 
 static void destroy_present_windows_for_toplevel(struct wlx_window *win);
 
