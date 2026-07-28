@@ -66,6 +66,30 @@ struct wlr_x11_touchpoint {
 	struct wl_list link; // wlr_x11_output.touch_points
 };
 
+/* Override-redirect X11 window that can Present buffers without being a
+ * wlr_output (no wl_output global, no per-window pointer device). Used for
+ * xdg_popup menus so they can extend past the parent toplevel. */
+struct wlr_x11_present_window {
+	struct wlr_x11_backend *x11;
+	struct wl_list link; // wlr_x11_backend.present_windows
+
+	xcb_window_t win;
+	xcb_present_event_t present_event_id;
+
+	int32_t width, height;
+	int16_t root_x, root_y;
+	bool mapped;
+
+	struct wl_list buffers; // wlr_x11_buffer.link
+	uint64_t last_msc;
+	uint32_t present_serial;
+
+	struct {
+		struct wl_signal destroy;
+		struct wl_signal frame; /* after PresentCompleteNotify */
+	} events;
+};
+
 struct wlr_x11_backend {
 	struct wlr_backend backend;
 	struct wl_event_loop *event_loop;
@@ -85,6 +109,7 @@ struct wlr_x11_backend {
 
 	size_t requested_outputs;
 	struct wl_list outputs; // wlr_x11_output.link
+	struct wl_list present_windows; // wlr_x11_present_window.link
 
 	struct wlr_keyboard keyboard;
 
@@ -104,6 +129,11 @@ struct wlr_x11_backend {
 		xcb_atom_t net_wm_name;
 		xcb_atom_t utf8_string;
 		xcb_atom_t variable_refresh;
+		xcb_atom_t net_wm_window_type;
+		xcb_atom_t net_wm_window_type_popup_menu;
+		xcb_atom_t net_wm_window_type_dropdown_menu;
+		xcb_atom_t net_wm_window_type_menu;
+		xcb_atom_t net_wm_window_type_tooltip;
 	} atoms;
 
 	// The time we last received an event
@@ -123,7 +153,7 @@ struct wlr_x11_buffer {
 	struct wlr_x11_backend *x11;
 	struct wlr_buffer *buffer;
 	xcb_pixmap_t pixmap;
-	struct wl_list link; // wlr_x11_output.buffers
+	struct wl_list link; // owner buffers list (output or present_window)
 	struct wl_listener buffer_destroy;
 	size_t n_busy;
 };
@@ -137,6 +167,16 @@ struct wlr_x11_backend *get_x11_backend_from_backend(
 	struct wlr_backend *wlr_backend);
 struct wlr_x11_output *get_x11_output_from_window_id(
 	struct wlr_x11_backend *x11, xcb_window_t window);
+struct wlr_x11_present_window *get_x11_present_window_from_window_id(
+	struct wlr_x11_backend *x11, xcb_window_t window);
+
+/* Shared pixmap import for outputs and present-windows. */
+void x11_buffer_destroy(struct wlr_x11_buffer *buffer);
+struct wlr_x11_buffer *x11_buffer_get_or_create(struct wlr_x11_backend *x11,
+	xcb_window_t drawable, struct wl_list *buffers,
+	struct wlr_buffer *wlr_buffer);
+struct wlr_x11_buffer *x11_buffer_find_by_pixmap(struct wl_list *buffers,
+	xcb_pixmap_t pixmap);
 
 extern const struct wlr_keyboard_impl x11_keyboard_impl;
 extern const struct wlr_pointer_impl x11_pointer_impl;

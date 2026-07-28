@@ -10,6 +10,7 @@
 #include <wlr/types/wlr_output.h>
 
 struct wlr_input_device;
+struct wlr_buffer;
 
 /**
  * Creates a new X11 backend. This backend will be created with no outputs;
@@ -84,5 +85,72 @@ xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend);
  */
 void wlr_x11_output_add_request_close_listener(struct wlr_output *output,
 	struct wl_listener *listener);
+
+/**
+ * Present-window: an X11 override-redirect window that can display buffers
+ * via Present/DRI3 without being a struct wlr_output.
+ *
+ * Unlike wlr_x11_output_create / wlr_x11_output_create_override_redirect, this
+ * does **not** emit backend.events.new_output or new_input. No wl_output
+ * global is advertised and no seat pointer device is created. Intended for
+ * rootless compositors hosting xdg_popup menus that must extend past the
+ * parent toplevel's X11 window.
+ *
+ * Opaque to callers; use the helpers below. Lifetime ends with
+ * wlr_x11_present_window_destroy() (or backend destroy).
+ */
+struct wlr_x11_present_window;
+
+/**
+ * Create an unmapped override-redirect present-window as a child of the root.
+ * Returns NULL if the backend is not X11 or not started.
+ */
+struct wlr_x11_present_window *wlr_x11_present_window_create(
+	struct wlr_backend *backend);
+
+/**
+ * Set root-space position and size. Safe before or after map. Does not map.
+ */
+void wlr_x11_present_window_configure(struct wlr_x11_present_window *win,
+	int16_t root_x, int16_t root_y, int32_t width, int32_t height);
+
+void wlr_x11_present_window_map(struct wlr_x11_present_window *win);
+void wlr_x11_present_window_unmap(struct wlr_x11_present_window *win);
+
+/**
+ * Present a buffer to the window (full pixmap; alpha-safe). The buffer must
+ * match the window size and the backend's X11 format. Returns false on import
+ * or protocol failure.
+ */
+bool wlr_x11_present_window_present(struct wlr_x11_present_window *win,
+	struct wlr_buffer *buffer);
+
+xcb_window_t wlr_x11_present_window_get_xcb(
+	struct wlr_x11_present_window *win);
+
+/** Last configured root-space position and size (zeros if win is NULL). */
+void wlr_x11_present_window_get_geometry(struct wlr_x11_present_window *win,
+	int16_t *root_x, int16_t *root_y, int32_t *width, int32_t *height);
+
+bool wlr_x11_present_window_is_mapped(struct wlr_x11_present_window *win);
+
+/**
+ * Destroy the present-window and its X11 resources. Emits events.destroy
+ * first. Safe with NULL.
+ */
+void wlr_x11_present_window_destroy(struct wlr_x11_present_window *win);
+
+/**
+ * Listen for PresentCompleteNotify (data is the present-window). Use to
+ * schedule the next frame; there is no wlr_output frame event.
+ */
+void wlr_x11_present_window_add_frame_listener(
+	struct wlr_x11_present_window *win, struct wl_listener *listener);
+
+/**
+ * Listen for destroy (data is the present-window).
+ */
+void wlr_x11_present_window_add_destroy_listener(
+	struct wlr_x11_present_window *win, struct wl_listener *listener);
 
 #endif

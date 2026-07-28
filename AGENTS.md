@@ -28,6 +28,8 @@ Important local changes:
 - Public helpers `wlr_x11_output_get_window()` and
   `wlr_x11_backend_get_connection()` so the compositor does not scan the
   root window's children to find the backing X id
+- `wlr_x11_present_window_*` API for rootless OR menus (Present/DRI3
+  without `wlr_output` / seat devices)
 
 Do not replace the subproject with an unpatched system wlroots without
 re-applying those fixes. Prefer extending the vendored tree when a change
@@ -75,7 +77,7 @@ Transients still use `WM_TRANSIENT_FOR` / dialog type via
 |------|------|
 | `src/main.c` | Startup, globals, seat, decorations |
 | `src/output.c` | Per-toplevel X11 output create/map/resize, size hints |
-| `src/xdg.c` | xdg_toplevel + xdg_popup (parent-scene placement) |
+| `src/xdg.c` | xdg_toplevel + xdg_popup (present-window menus) |
 | `src/x11.c` | Side-channel XCB (title, class, focus, properties) |
 | `src/input.c` | Pointer/keyboard; coords from X11 root, not layout cursor |
 | `src/move_resize.c` | Host configure during drag |
@@ -99,10 +101,31 @@ clients at the printed `WAYLAND_DISPLAY`.
 
 ## Popups
 
-Keep popups in the **parent scene / same X11 window**. Do not reintroduce
-per-popup or shared OR `wlr_output`s without a present path that is not a
-full output (see [TODO.md](TODO.md)). Pointer hit-testing must use real X11
-window geometry, not `wlr_output_layout` positions.
+`xdg_popup` menus use a **rootless override-redirect present-window**
+(`wlr_x11_present_window` in vendored wlroots), not a second `wlr_output`.
+
+Rules:
+
+1. **No** `wlr_output` / `wl_output` global / `new_input` device per popup.
+2. Present-windows are OR root children with `_NET_WM_WINDOW_TYPE_MENU`.
+3. Scene trees are parked off-layout; the compositor presents buffers
+   explicitly (`popup_render_and_present`).
+4. Hit-test in **root X11 coordinates**: popups first (`popup_at_root_pointer`
+   / root box), then toplevels. Never use `wlr_output_layout` cursor coords
+   for focus.
+5. Do **not** call `wlr_seat_pointer_notify_enter` while `button_count > 0`
+   if that would change the focused surface.
+6. Parent move → `wlx_reposition_popups_for_window`; parent unmap/destroy
+   tears down child present-windows first.
+
+Fallback: if present-window create fails, the popup is placed in the parent
+scene (clipped) so the menu still appears.
+
+`wlr_x11_output_create_override_redirect` remains for the bootstrap
+`WLX-BOOT` monitor and CSD transient dialogs only — not for menus.
+
+Retired approaches: parent-window expand; per-popup / shared OR `wlr_output`.
+See [TODO.md](TODO.md) for history and remaining integration checks.
 
 ## When changing behavior
 

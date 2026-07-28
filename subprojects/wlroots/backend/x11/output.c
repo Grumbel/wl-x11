@@ -90,8 +90,6 @@ static bool output_set_custom_mode(struct wlr_output *wlr_output,
 	return true;
 }
 
-static void destroy_x11_buffer(struct wlr_x11_buffer *buffer);
-
 static void output_destroy(struct wlr_output *wlr_output) {
 	struct wlr_x11_output *output = get_x11_output_from_output(wlr_output);
 	struct wlr_x11_backend *x11 = output->x11;
@@ -105,7 +103,7 @@ static void output_destroy(struct wlr_output *wlr_output) {
 
 	struct wlr_x11_buffer *buffer, *buffer_tmp;
 	wl_list_for_each_safe(buffer, buffer_tmp, &output->buffers, link) {
-		destroy_x11_buffer(buffer);
+		x11_buffer_destroy(buffer);
 	}
 
 	wl_list_remove(&output->link);
@@ -196,7 +194,7 @@ static bool output_test(struct wlr_output *wlr_output,
 	return true;
 }
 
-static void destroy_x11_buffer(struct wlr_x11_buffer *buffer) {
+void x11_buffer_destroy(struct wlr_x11_buffer *buffer) {
 	if (!buffer) {
 		return;
 	}
@@ -213,13 +211,11 @@ static void buffer_handle_buffer_destroy(struct wl_listener *listener,
 		void *data) {
 	struct wlr_x11_buffer *buffer =
 		wl_container_of(listener, buffer, buffer_destroy);
-	destroy_x11_buffer(buffer);
+	x11_buffer_destroy(buffer);
 }
 
-static xcb_pixmap_t import_dmabuf(struct wlr_x11_output *output,
-		struct wlr_dmabuf_attributes *dmabuf) {
-	struct wlr_x11_backend *x11 = output->x11;
-
+static xcb_pixmap_t import_dmabuf(struct wlr_x11_backend *x11,
+		xcb_window_t drawable, struct wlr_dmabuf_attributes *dmabuf) {
 	if (dmabuf->format != x11->x11_format->drm) {
 		// The pixmap's depth must match the window's depth, otherwise Present
 		// will throw a Match error
@@ -240,7 +236,7 @@ static xcb_pixmap_t import_dmabuf(struct wlr_x11_output *output,
 			wlr_dmabuf_attributes_finish(&dup_attrs);
 			return XCB_PIXMAP_NONE;
 		}
-		xcb_dri3_pixmap_from_buffers(x11->xcb, pixmap, output->win,
+		xcb_dri3_pixmap_from_buffers(x11->xcb, pixmap, drawable,
 			dmabuf->n_planes, dmabuf->width, dmabuf->height, dmabuf->stride[0],
 			dmabuf->offset[0], dmabuf->stride[1], dmabuf->offset[1],
 			dmabuf->stride[2], dmabuf->offset[2], dmabuf->stride[3],
@@ -253,7 +249,7 @@ static xcb_pixmap_t import_dmabuf(struct wlr_x11_output *output,
 			wlr_dmabuf_attributes_finish(&dup_attrs);
 			return XCB_PIXMAP_NONE;
 		}
-		xcb_dri3_pixmap_from_buffer(x11->xcb, pixmap, output->win,
+		xcb_dri3_pixmap_from_buffer(x11->xcb, pixmap, drawable,
 			dmabuf->height * dmabuf->stride[0], dmabuf->width, dmabuf->height,
 			dmabuf->stride[0], x11_fmt->depth, x11_fmt->bpp, dup_attrs.fd[0]);
 	}
@@ -261,10 +257,8 @@ static xcb_pixmap_t import_dmabuf(struct wlr_x11_output *output,
 	return pixmap;
 }
 
-static xcb_pixmap_t import_shm(struct wlr_x11_output *output,
-		struct wlr_shm_attributes *shm) {
-	struct wlr_x11_backend *x11 = output->x11;
-
+static xcb_pixmap_t import_shm(struct wlr_x11_backend *x11,
+		xcb_window_t drawable, struct wlr_shm_attributes *shm) {
 	if (shm->format != x11->x11_format->drm) {
 		// The pixmap's depth must match the window's depth, otherwise Present
 		// will throw a Match error
@@ -288,7 +282,7 @@ static xcb_pixmap_t import_shm(struct wlr_x11_output *output,
 	xcb_shm_attach_fd(x11->xcb, seg, fd, false);
 
 	xcb_pixmap_t pixmap = xcb_generate_id(x11->xcb);
-	xcb_shm_create_pixmap(x11->xcb, pixmap, output->win, shm->width,
+	xcb_shm_create_pixmap(x11->xcb, pixmap, drawable, shm->width,
 		shm->height, x11->x11_format->depth, seg, shm->offset);
 
 	xcb_shm_detach(x11->xcb, seg);
@@ -296,17 +290,17 @@ static xcb_pixmap_t import_shm(struct wlr_x11_output *output,
 	return pixmap;
 }
 
-static struct wlr_x11_buffer *create_x11_buffer(struct wlr_x11_output *output,
+static struct wlr_x11_buffer *create_x11_buffer(struct wlr_x11_backend *x11,
+		xcb_window_t drawable, struct wl_list *buffers,
 		struct wlr_buffer *wlr_buffer) {
-	struct wlr_x11_backend *x11 = output->x11;
 	xcb_pixmap_t pixmap = XCB_PIXMAP_NONE;
 
 	struct wlr_dmabuf_attributes dmabuf_attrs;
 	struct wlr_shm_attributes shm_attrs;
 	if (wlr_buffer_get_dmabuf(wlr_buffer, &dmabuf_attrs)) {
-		pixmap = import_dmabuf(output, &dmabuf_attrs);
+		pixmap = import_dmabuf(x11, drawable, &dmabuf_attrs);
 	} else if (wlr_buffer_get_shm(wlr_buffer, &shm_attrs)) {
-		pixmap = import_shm(output, &shm_attrs);
+		pixmap = import_shm(x11, drawable, &shm_attrs);
 	}
 
 	if (pixmap == XCB_PIXMAP_NONE) {
@@ -322,7 +316,7 @@ static struct wlr_x11_buffer *create_x11_buffer(struct wlr_x11_output *output,
 	buffer->n_busy = 1;
 	buffer->pixmap = pixmap;
 	buffer->x11 = x11;
-	wl_list_insert(&output->buffers, &buffer->link);
+	wl_list_insert(buffers, &buffer->link);
 
 	buffer->buffer_destroy.notify = buffer_handle_buffer_destroy;
 	wl_signal_add(&wlr_buffer->events.destroy, &buffer->buffer_destroy);
@@ -330,10 +324,11 @@ static struct wlr_x11_buffer *create_x11_buffer(struct wlr_x11_output *output,
 	return buffer;
 }
 
-static struct wlr_x11_buffer *get_or_create_x11_buffer(
-		struct wlr_x11_output *output, struct wlr_buffer *wlr_buffer) {
+struct wlr_x11_buffer *x11_buffer_get_or_create(struct wlr_x11_backend *x11,
+		xcb_window_t drawable, struct wl_list *buffers,
+		struct wlr_buffer *wlr_buffer) {
 	struct wlr_x11_buffer *buffer;
-	wl_list_for_each(buffer, &output->buffers, link) {
+	wl_list_for_each(buffer, buffers, link) {
 		if (buffer->buffer == wlr_buffer) {
 			wlr_buffer_lock(buffer->buffer);
 			buffer->n_busy++;
@@ -341,7 +336,18 @@ static struct wlr_x11_buffer *get_or_create_x11_buffer(
 		}
 	}
 
-	return create_x11_buffer(output, wlr_buffer);
+	return create_x11_buffer(x11, drawable, buffers, wlr_buffer);
+}
+
+struct wlr_x11_buffer *x11_buffer_find_by_pixmap(struct wl_list *buffers,
+		xcb_pixmap_t pixmap) {
+	struct wlr_x11_buffer *buffer;
+	wl_list_for_each(buffer, buffers, link) {
+		if (buffer->pixmap == pixmap) {
+			return buffer;
+		}
+	}
+	return NULL;
 }
 
 static bool output_commit_buffer(struct wlr_x11_output *output,
@@ -349,8 +355,8 @@ static bool output_commit_buffer(struct wlr_x11_output *output,
 	struct wlr_x11_backend *x11 = output->x11;
 
 	struct wlr_buffer *buffer = state->buffer;
-	struct wlr_x11_buffer *x11_buffer =
-		get_or_create_x11_buffer(output, buffer);
+	struct wlr_x11_buffer *x11_buffer = x11_buffer_get_or_create(
+		x11, output->win, &output->buffers, buffer);
 	if (!x11_buffer) {
 		goto error;
 	}
@@ -404,7 +410,7 @@ static bool output_commit_buffer(struct wlr_x11_output *output,
 	return true;
 
 error:
-	destroy_x11_buffer(x11_buffer);
+	x11_buffer_destroy(x11_buffer);
 	return false;
 }
 
@@ -797,34 +803,34 @@ xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend) {
 	return x11->xcb;
 }
 
-static struct wlr_x11_buffer *get_x11_buffer(struct wlr_x11_output *output,
-		xcb_pixmap_t pixmap) {
-	struct wlr_x11_buffer *buffer;
-	wl_list_for_each(buffer, &output->buffers, link) {
-		if (buffer->pixmap == pixmap) {
-			return buffer;
-		}
-	}
-	return NULL;
-}
-
 void handle_x11_present_event(struct wlr_x11_backend *x11,
 		xcb_ge_generic_event_t *event) {
 	struct wlr_x11_output *output;
+	struct wlr_x11_present_window *pwin;
 
 	switch (event->event_type) {
 	case XCB_PRESENT_EVENT_IDLE_NOTIFY:;
 		xcb_present_idle_notify_event_t *idle_notify =
 			(xcb_present_idle_notify_event_t *)event;
 
+		struct wl_list *buffers = NULL;
 		output = get_x11_output_from_window_id(x11, idle_notify->window);
-		if (!output) {
+		if (output) {
+			buffers = &output->buffers;
+		} else {
+			pwin = get_x11_present_window_from_window_id(x11,
+				idle_notify->window);
+			if (pwin) {
+				buffers = &pwin->buffers;
+			}
+		}
+		if (!buffers) {
 			wlr_log(WLR_DEBUG, "Got PresentIdleNotify event for unknown window");
 			return;
 		}
 
 		struct wlr_x11_buffer *buffer =
-			get_x11_buffer(output, idle_notify->pixmap);
+			x11_buffer_find_by_pixmap(buffers, idle_notify->pixmap);
 		if (!buffer) {
 			wlr_log(WLR_DEBUG, "Got PresentIdleNotify event for unknown buffer");
 			return;
@@ -839,30 +845,40 @@ void handle_x11_present_event(struct wlr_x11_backend *x11,
 			(xcb_present_complete_notify_event_t *)event;
 
 		output = get_x11_output_from_window_id(x11, complete_notify->window);
-		if (!output) {
-			wlr_log(WLR_DEBUG, "Got PresentCompleteNotify event for unknown window");
-			return;
+		if (output) {
+			output->last_msc = complete_notify->msc;
+
+			uint32_t flags = 0;
+			if (complete_notify->mode == XCB_PRESENT_COMPLETE_MODE_FLIP) {
+				flags |= WLR_OUTPUT_PRESENT_ZERO_COPY;
+			}
+
+			bool presented = complete_notify->mode !=
+				XCB_PRESENT_COMPLETE_MODE_SKIP;
+			struct wlr_output_event_present present_event = {
+				.output = &output->wlr_output,
+				.commit_seq = complete_notify->serial,
+				.presented = presented,
+				.seq = complete_notify->msc,
+				.flags = flags,
+			};
+			timespec_from_nsec(&present_event.when,
+				complete_notify->ust * 1000);
+			wlr_output_send_present(&output->wlr_output, &present_event);
+			wlr_output_send_frame(&output->wlr_output);
+			break;
 		}
 
-		output->last_msc = complete_notify->msc;
-
-		uint32_t flags = 0;
-		if (complete_notify->mode == XCB_PRESENT_COMPLETE_MODE_FLIP) {
-			flags |= WLR_OUTPUT_PRESENT_ZERO_COPY;
+		pwin = get_x11_present_window_from_window_id(x11,
+			complete_notify->window);
+		if (pwin) {
+			pwin->last_msc = complete_notify->msc;
+			wl_signal_emit_mutable(&pwin->events.frame, pwin);
+			break;
 		}
 
-		bool presented = complete_notify->mode != XCB_PRESENT_COMPLETE_MODE_SKIP;
-		struct wlr_output_event_present present_event = {
-			.output = &output->wlr_output,
-			.commit_seq = complete_notify->serial,
-			.presented = presented,
-			.seq = complete_notify->msc,
-			.flags = flags,
-		};
-		timespec_from_nsec(&present_event.when, complete_notify->ust * 1000);
-		wlr_output_send_present(&output->wlr_output, &present_event);
-
-		wlr_output_send_frame(&output->wlr_output);
+		wlr_log(WLR_DEBUG,
+			"Got PresentCompleteNotify event for unknown window");
 		break;
 	default:
 		wlr_log(WLR_DEBUG, "Unhandled Present event %"PRIu16, event->event_type);

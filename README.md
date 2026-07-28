@@ -112,16 +112,15 @@ one-window-per-toplevel model.
 
 ### Popups
 
-`xdg_popup` surfaces (menus, combo dropdowns, tooltips) are placed in the
-**parent toplevel’s scene tree** and drawn in the same X11 window. Input and
-grabs stay simple; the menu moves with the parent. Content that would extend
-past the parent edge is **clipped**.
+`xdg_popup` surfaces (menus, combo dropdowns, tooltips) use **rootless
+override-redirect present-windows** (`wlr_x11_present_window`): each menu is
+a separate X11 OR window, so content is **not clipped** by the parent frame.
+There is no extra `wl_output` global or seat pointer device per popup.
 
-Override-redirect / extra `wlr_output` windows per popup were tried and
-rejected (new `wl_output` globals break Qt; dual-window input is fragile).
-A possible future approach is temporarily expanding the parent window while
-a popup is open — more practical with `--csd` than with host SSD. See
-[TODO.md](TODO.md).
+Input is hit-tested in root X11 coordinates (popups first, then toplevels).
+Menus reposition when the parent moves; they are destroyed with the parent.
+If present-window creation fails, the compositor falls back to parent-scene
+placement (clipped). See [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
 
 ### Decorations
 

@@ -188,6 +188,25 @@ bool query_window_root_position(struct wlx_server *s, xcb_window_t w,
 	return true;
 }
 
+/* Prefer the wlroots-owned content window; fall back to decoration frame. */
+bool window_content_root_position(struct wlx_window *win, int16_t *x, int16_t *y) {
+	if (!win || !win->server || !x || !y) {
+		return false;
+	}
+	xcb_window_t target = XCB_WINDOW_NONE;
+	if (win->output) {
+		target = wlr_x11_output_get_window(win->output);
+	}
+	if (target == XCB_WINDOW_NONE) {
+		target = win->content_xwin != XCB_WINDOW_NONE
+			? win->content_xwin : win->xwin;
+	}
+	if (target == XCB_WINDOW_NONE) {
+		return false;
+	}
+	return query_window_root_position(win->server, target, x, y);
+}
+
 bool query_window_geometry(struct wlx_server *s, xcb_window_t w,
 		int *width, int *height) {
 	if (!s->xcb || xcb_connection_has_error(s->xcb) || w == XCB_WINDOW_NONE) {
@@ -612,7 +631,7 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 					} else if (popup_at_root_pointer(server) ||
 							window_has_mapped_popup(server, win)) {
 						/* Qt/GTK dismiss menus when keyboard focus is
-						 * cleared. Keep focus while an OR popup is up. */
+						 * cleared. Keep focus while a present-window popup is up. */
 						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x — popup active, "
 							"keeping keyboard focus", fo->event);
 					} else {

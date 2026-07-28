@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <sys/wait.h>
 
+/* Hit-test using layout cursor (mostly unused for focus; kept for DnD). */
 struct wlr_surface *surface_at_cursor(struct wlx_server *server,
 		double *sx, double *sy) {
 	struct wlr_scene_node *node = wlr_scene_node_at(&server->scene->tree.node,
@@ -30,6 +31,139 @@ struct wlr_surface *surface_at_cursor(struct wlx_server *server,
 	/* With --scale, dest rectangles are enlarged; node_at returns coords in
 	 * that scaled dest space. Clients expect surface-local (logical) coords. */
 	wlx_pointer_to_surface(server, sx, sy);
+	return surface;
+}
+
+/* Resolve surface under the real X11 root pointer.
+ * Order: mapped present-window popups (newest first), then toplevels.
+ * Never uses wlr_output_layout coordinates for placement. */
+static struct wlr_surface *surface_under_root_pointer(
+		struct wlx_server *server, double *sx_out, double *sy_out,
+		struct wlx_window **win_out, struct wlx_popup **pop_out) {
+	if (sx_out) {
+		*sx_out = 0;
+	}
+	if (sy_out) {
+		*sy_out = 0;
+	}
+	if (win_out) {
+		*win_out = NULL;
+	}
+	if (pop_out) {
+		*pop_out = NULL;
+	}
+	if (!server) {
+		return NULL;
+	}
+
+	int16_t px = 0, py = 0;
+	if (!query_root_pointer_position(server, &px, &py)) {
+		return NULL;
+	}
+
+	/* --- Popups (present-windows or parent-scene root boxes) --- */
+	struct wlx_popup *pop = popup_at_root_pointer(server);
+	if (pop && pop->xdg_popup && pop->xdg_popup->base->surface &&
+			pop->root_box_valid) {
+		double pix_sx = (double)(px - pop->root_x);
+		double pix_sy = (double)(py - pop->root_y);
+		struct wlr_surface *surface = pop->xdg_popup->base->surface;
+		double sx = pix_sx, sy = pix_sy;
+		wlx_pointer_to_surface(server, &sx, &sy);
+
+		/* Prefer scene buffer under the pointer (subsurfaces). Scene is
+		 * parked off-layout; convert root-relative pixels into scene
+		 * coordinates via the parked node origin. */
+		if (pop->scene_tree) {
+			int ox = 0, oy = 0;
+			wlr_scene_node_coords(&pop->scene_tree->node, &ox, &oy);
+			double lx = (double)ox + pix_sx;
+			double ly = (double)oy + pix_sy;
+			double hx = 0, hy = 0;
+			struct wlr_scene_node *node = wlr_scene_node_at(
+				&server->scene->tree.node, lx, ly, &hx, &hy);
+			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
+				struct wlr_scene_buffer *buf =
+					wlr_scene_buffer_from_node(node);
+				struct wlr_scene_surface *ss =
+					wlr_scene_surface_try_from_buffer(buf);
+				if (ss) {
+					surface = ss->surface;
+					sx = hx;
+					sy = hy;
+				}
+			}
+		}
+
+		if (sx_out) {
+			*sx_out = sx;
+		}
+		if (sy_out) {
+			*sy_out = sy;
+		}
+		if (pop_out) {
+			*pop_out = pop;
+		}
+		if (win_out) {
+			*win_out = pop->parent;
+		}
+		return surface;
+	}
+
+	/* --- Toplevel content windows --- */
+	struct wlx_window *under = window_at_root_pointer(server);
+	if (!under || !under->toplevel) {
+		return NULL;
+	}
+	double sx = 0, sy = 0;
+	if (!pointer_coords_on_window(server, under, &sx, &sy)) {
+		return NULL;
+	}
+	double pix_sx = sx, pix_sy = sy;
+	double log_sx = pix_sx, log_sy = pix_sy;
+	wlx_pointer_to_surface(server, &log_sx, &log_sy);
+
+	struct wlr_surface *surface = under->toplevel->base->surface;
+	sx = log_sx;
+	sy = log_sy;
+	if (!server->prefer_csd && under->toplevel) {
+		struct wlr_box geo = under->toplevel->base->current.geometry;
+		if (geo.width > 0 && geo.height > 0) {
+			sx += geo.x;
+			sy += geo.y;
+		}
+	}
+
+	if (under->scene_tree) {
+		int ox = 0, oy = 0;
+		wlr_scene_node_coords(&under->scene_tree->node, &ox, &oy);
+		double lx = (double)ox + pix_sx;
+		double ly = (double)oy + pix_sy;
+		double hx = 0, hy = 0;
+		struct wlr_scene_node *node = wlr_scene_node_at(
+			&server->scene->tree.node, lx, ly, &hx, &hy);
+		if (node && node->type == WLR_SCENE_NODE_BUFFER) {
+			struct wlr_scene_buffer *buf =
+				wlr_scene_buffer_from_node(node);
+			struct wlr_scene_surface *ss =
+				wlr_scene_surface_try_from_buffer(buf);
+			if (ss) {
+				surface = ss->surface;
+				sx = hx;
+				sy = hy;
+			}
+		}
+	}
+
+	if (sx_out) {
+		*sx_out = sx;
+	}
+	if (sy_out) {
+		*sy_out = sy;
+	}
+	if (win_out) {
+		*win_out = under;
+	}
 	return surface;
 }
 
@@ -153,60 +287,11 @@ void process_cursor_motion(struct wlx_server *server, uint32_t time_msec) {
 		dnd_out_update_position(server);
 	}
 
-	/* Prefer the real X11 window under the pointer and its surface-local
-	 * coords. The layout cursor can be wildly wrong (enter at 1262,-66 on
-	 * an 884x391 window) because outputs are side-by-side in the layout
-	 * while X11 windows are independently placed on the host desktop. */
+	/* Root-space hit-test: present-window popups first, then toplevels.
+	 * Never use output-layout cursor coordinates for focus. */
 	double sx = 0, sy = 0;
-	struct wlr_surface *surface = NULL;
-
-	/* Parent-scene popups are children of the toplevel scene tree. Hit-test
-	 * via the X11 window under the pointer + scene_node_at so menus and
-	 * subsurfaces share one coordinate path. */
-	struct wlx_window *under = window_at_root_pointer(server);
-	if (under && under->toplevel &&
-			pointer_coords_on_window(server, under, &sx, &sy)) {
-		double pix_sx = sx, pix_sy = sy;
-		double log_sx = pix_sx, log_sy = pix_sy;
-		wlx_pointer_to_surface(server, &log_sx, &log_sy);
-
-		surface = under->toplevel->base->surface;
-		sx = log_sx;
-		sy = log_sy;
-		if (!under->server->prefer_csd) {
-			struct wlr_box geo = under->toplevel->base->current.geometry;
-			if (geo.width > 0 && geo.height > 0) {
-				sx += geo.x;
-				sy += geo.y;
-			}
-		}
-
-		if (under->scene_tree) {
-			int ox = 0, oy = 0;
-			wlr_scene_node_coords(&under->scene_tree->node, &ox, &oy);
-			double lx = (double)ox + pix_sx;
-			double ly = (double)oy + pix_sy;
-			double hx = 0, hy = 0;
-			struct wlr_scene_node *node = wlr_scene_node_at(
-				&server->scene->tree.node, lx, ly, &hx, &hy);
-			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
-				struct wlr_scene_buffer *buf =
-					wlr_scene_buffer_from_node(node);
-				struct wlr_scene_surface *ss =
-					wlr_scene_surface_try_from_buffer(buf);
-				if (ss) {
-					/* hx/hy are surface-local (wlroots maps dest→buffer
-					 * when dst_size differs for --scale). */
-					surface = ss->surface;
-					sx = hx;
-					sy = hy;
-				}
-			}
-		}
-	}
-	/* Do not fall back to layout-cursor scene picking: outputs are laid out
-	 * side-by-side while X11 windows are freely placed, so cursor layout
-	 * coords are almost always wrong and produce huge pointer offsets. */
+	struct wlr_surface *surface = surface_under_root_pointer(
+		server, &sx, &sy, NULL, NULL);
 
 	struct wlr_surface *prev = server->seat->pointer_state.focused_surface;
 	if (surface == prev) {
@@ -291,59 +376,41 @@ struct wlx_window *window_from_surface(struct wlr_surface *surface) {
 /* Resolve the surface under the root pointer and notify pointer enter.
  * Used for both press and release: xdg popup grabs end the grab (and
  * dismiss the popup) when a button event is delivered with no focused
- * surface of the grabbing client (serial == 0). That commonly happens
- * on release after a newly mapped OR popup briefly steals X11 pointer
- * events before seat focus is updated. */
+ * surface of the grabbing client (serial == 0). Outside clicks therefore
+ * must not leave a stale focused surface from a previous enter. */
 struct wlr_surface *pointer_enter_surface_under_cursor(
 		struct wlx_server *server) {
 	double sx = 0, sy = 0;
-	struct wlr_surface *surface = NULL;
+	struct wlx_window *win = NULL;
+	struct wlx_popup *pop = NULL;
+	struct wlr_surface *surface = surface_under_root_pointer(
+		server, &sx, &sy, &win, &pop);
 
-	struct wlx_window *win = window_at_root_pointer(server);
-	if (win && win->toplevel &&
-			pointer_coords_on_window(server, win, &sx, &sy)) {
-		double pix_sx = sx, pix_sy = sy;
-		double log_sx = pix_sx, log_sy = pix_sy;
-		wlx_pointer_to_surface(server, &log_sx, &log_sy);
-
-		surface = win->toplevel->base->surface;
-		sx = log_sx;
-		sy = log_sy;
-		if (!win->server->prefer_csd) {
-			struct wlr_box geo = win->toplevel->base->current.geometry;
-			if (geo.width > 0 && geo.height > 0) {
-				sx += geo.x;
-				sy += geo.y;
-			}
+	if (!surface) {
+		/* Outside every popup and toplevel: clear focus so an active
+		 * xdg_popup grab sees serial 0 / no client surface and dismisses. */
+		if (server->seat->pointer_state.focused_surface) {
+			wlr_seat_pointer_clear_focus(server->seat);
 		}
-		if (win->scene_tree) {
-			int ox = 0, oy = 0;
-			wlr_scene_node_coords(&win->scene_tree->node, &ox, &oy);
-			double lx = (double)ox + pix_sx;
-			double ly = (double)oy + pix_sy;
-			double hx = 0, hy = 0;
-			struct wlr_scene_node *node = wlr_scene_node_at(
-				&server->scene->tree.node, lx, ly, &hx, &hy);
-			if (node && node->type == WLR_SCENE_NODE_BUFFER) {
-				struct wlr_scene_buffer *buf =
-					wlr_scene_buffer_from_node(node);
-				struct wlr_scene_surface *ss =
-					wlr_scene_surface_try_from_buffer(buf);
-				if (ss) {
-					/* hx/hy are surface-local (wlroots maps dest→buffer
-					 * when dst_size differs for --scale). */
-					surface = ss->surface;
-					sx = hx;
-					sy = hy;
-				}
-			}
-		}
-		set_active_window(server, win);
-		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-		return surface;
+		return NULL;
 	}
 
-	return NULL;
+	/* Toplevel content (or parent of a popup hit): mark active for keyboard
+	 * focus tracking. Popup-only hits still activate the parent toplevel. */
+	if (win) {
+		set_active_window(server, win);
+	}
+
+	/* Do not notify_enter while a button is held if it would change the
+	 * focused surface — resets seat buttons mid-click. */
+	struct wlr_surface *prev = server->seat->pointer_state.focused_surface;
+	if (server->seat->pointer_state.button_count > 0 && prev &&
+			prev != surface) {
+		return prev;
+	}
+
+	wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
+	return surface;
 }
 
 void wlx_pointer_refresh_focus(struct wlx_server *server) {

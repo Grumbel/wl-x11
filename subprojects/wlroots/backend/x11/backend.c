@@ -190,6 +190,11 @@ static void backend_destroy(struct wlr_backend *backend) {
 		wlr_output_destroy(&output->wlr_output);
 	}
 
+	struct wlr_x11_present_window *pwin, *pwin_tmp;
+	wl_list_for_each_safe(pwin, pwin_tmp, &x11->present_windows, link) {
+		wlr_x11_present_window_destroy(pwin);
+	}
+
 	wlr_keyboard_finish(&x11->keyboard);
 
 	wlr_backend_finish(backend);
@@ -406,6 +411,7 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 	wlr_backend_init(&x11->backend, &backend_impl);
 	x11->event_loop = loop;
 	wl_list_init(&x11->outputs);
+	wl_list_init(&x11->present_windows);
 
 	x11->xcb = xcb_connect(x11_display, NULL);
 	if (xcb_connection_has_error(x11->xcb)) {
@@ -425,6 +431,15 @@ struct wlr_backend *wlr_x11_backend_create(struct wl_event_loop *loop,
 		{ .name = "_NET_WM_NAME", .atom = &x11->atoms.net_wm_name },
 		{ .name = "UTF8_STRING", .atom = &x11->atoms.utf8_string },
 		{ .name = "_VARIABLE_REFRESH", .atom = &x11->atoms.variable_refresh },
+		{ .name = "_NET_WM_WINDOW_TYPE", .atom = &x11->atoms.net_wm_window_type },
+		{ .name = "_NET_WM_WINDOW_TYPE_POPUP_MENU",
+			.atom = &x11->atoms.net_wm_window_type_popup_menu },
+		{ .name = "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
+			.atom = &x11->atoms.net_wm_window_type_dropdown_menu },
+		{ .name = "_NET_WM_WINDOW_TYPE_MENU",
+			.atom = &x11->atoms.net_wm_window_type_menu },
+		{ .name = "_NET_WM_WINDOW_TYPE_TOOLTIP",
+			.atom = &x11->atoms.net_wm_window_type_tooltip },
 	};
 
 	for (size_t i = 0; i < sizeof(atom) / sizeof(atom[0]); ++i) {

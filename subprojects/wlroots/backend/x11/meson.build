@@ -31,6 +31,7 @@ wlr_files += files(
 	'backend.c',
 	'input_device.c',
 	'output.c',
+	'present_window.c',
 )
 wlr_deps += x11_libs
 features += { 'x11-backend': true }

@@ -12,8 +12,20 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <math.h>
+
+#include <drm_fourcc.h>
+
+#include <wlr/render/allocator.h>
+#include <wlr/render/pass.h>
+#include <wlr/render/wlr_renderer.h>
+#include <wlr/render/wlr_texture.h>
+#include <wlr/render/drm_format_set.h>
+
+static void destroy_present_windows_for_toplevel(struct wlx_window *win);
 
 void xdg_toplevel_map(struct wl_listener *listener, void *data) {
+
 	struct wlx_window *win = wl_container_of(listener, win, map);
 	wlr_log(WLR_INFO, "surface map event received");
 	if (win->output) {
@@ -30,7 +42,8 @@ void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, unmap);
-	/* Cancel any pending host-close recreate; the client is going away. */
+	/* Present-windows first so OR X11 windows cannot outlive the parent. */
+	destroy_present_windows_for_toplevel(win);
 	if (win->output) {
 		/* wlr_output_destroy() synchronously fires events.destroy,
 		 * which runs output_destroy() above and clears win->output. */
@@ -247,6 +260,7 @@ void surface_commit(struct wl_listener *listener, void *data) {
 void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, destroy);
 
+	destroy_present_windows_for_toplevel(win);
 	if (win->output) {
 		wlr_output_destroy(win->output);
 	}
@@ -401,54 +415,144 @@ void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 }
 
 /* ------------------------------------------------------------------- */
-/* xdg_popup → override-redirect X11 window                            */
+/* xdg_popup — data model (present-window ready; parent-scene until P3) */
 /* ------------------------------------------------------------------- */
 
 static struct wlx_window *popup_find_toplevel_window(struct wlr_xdg_popup *popup) {
-       struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(popup->parent);
+	struct wlr_xdg_surface *parent =
+		wlr_xdg_surface_try_from_wlr_surface(popup->parent);
 	while (parent) {
 		if (parent->role == WLR_XDG_SURFACE_ROLE_TOPLEVEL && parent->data) {
 			return parent->data;
 		}
 		if (parent->role == WLR_XDG_SURFACE_ROLE_POPUP && parent->popup) {
-                  parent = wlr_xdg_surface_try_from_wlr_surface(parent->popup->parent);
-                  continue;
+			parent = wlr_xdg_surface_try_from_wlr_surface(
+				parent->popup->parent);
+			continue;
 		}
 		break;
 	}
 	return NULL;
 }
 
-static void popup_output_frame(struct wl_listener *listener, void *data) {
-	struct wlx_popup *pop = wl_container_of(listener, pop, output_frame);
-	(void)data;
-	if (!pop->scene_output) {
+/* Drop the OR present-window if any. Safe when still on parent-scene path. */
+static void popup_destroy_xpresent(struct wlx_popup *pop) {
+	if (!pop) {
 		return;
 	}
-	wlr_scene_output_commit(pop->scene_output, NULL);
+	if (pop->xpresent_frame.link.prev) {
+		wl_list_remove(&pop->xpresent_frame.link);
+		pop->xpresent_frame.link.prev = NULL;
+		pop->xpresent_frame.link.next = NULL;
+	}
+	if (pop->xpresent_destroy.link.prev) {
+		wl_list_remove(&pop->xpresent_destroy.link);
+		pop->xpresent_destroy.link.prev = NULL;
+		pop->xpresent_destroy.link.next = NULL;
+	}
+	if (pop->xpresent) {
+		wlr_x11_present_window_destroy(pop->xpresent);
+		pop->xpresent = NULL;
+	}
+	pop->root_box_valid = false;
+}
+
+static void popup_handle_xpresent_destroy(struct wl_listener *listener,
+		void *data) {
+	struct wlx_popup *pop =
+		wl_container_of(listener, pop, xpresent_destroy);
+	(void)data;
+	if (pop->xpresent_frame.link.prev) {
+		wl_list_remove(&pop->xpresent_frame.link);
+		pop->xpresent_frame.link.prev = NULL;
+		pop->xpresent_frame.link.next = NULL;
+	}
+	if (pop->xpresent_destroy.link.prev) {
+		wl_list_remove(&pop->xpresent_destroy.link);
+		pop->xpresent_destroy.link.prev = NULL;
+		pop->xpresent_destroy.link.next = NULL;
+	}
+	pop->xpresent = NULL;
+	pop->root_box_valid = false;
+}
+
+static void popup_send_frame_done_iterator(struct wlr_scene_buffer *scene_buffer,
+		int lx, int ly, void *user_data) {
+	(void)lx;
+	(void)ly;
+	struct timespec *now = user_data;
+	struct wlr_scene_surface *scene_surface =
+		wlr_scene_surface_try_from_buffer(scene_buffer);
+	if (scene_surface) {
+		wlr_scene_surface_send_frame_done(scene_surface, now);
+	}
+}
+
+static void popup_handle_xpresent_frame(struct wl_listener *listener,
+		void *data) {
+	struct wlx_popup *pop =
+		wl_container_of(listener, pop, xpresent_frame);
+	(void)data;
+	if (!pop->scene_tree) {
+		return;
+	}
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
-	wlr_scene_output_send_frame_done(pop->scene_output, &now);
+	wlr_scene_node_for_each_buffer(&pop->scene_tree->node,
+		popup_send_frame_done_iterator, &now);
 }
 
-static void popup_output_destroy(struct wl_listener *listener, void *data) {
-	struct wlx_popup *pop = wl_container_of(listener, pop, output_destroy);
-	(void)data;
-	wl_list_remove(&pop->output_frame.link);
-	wl_list_remove(&pop->output_destroy.link);
-	pop->output = NULL;
-	pop->scene_output = NULL;
-	pop->l_output = NULL;
-}
-
-static void popup_destroy_output(struct wlx_popup *pop) {
-	if (!pop->output) {
+/* Refresh root_x/y/w/h from present-window or parent-relative geometry. */
+static void popup_update_root_box(struct wlx_popup *pop) {
+	if (!pop || !pop->xdg_popup) {
 		return;
 	}
-	wlr_output_destroy(pop->output);
-	/* output_destroy listener clears fields */
-}
+	pop->root_box_valid = false;
 
+	if (pop->xpresent) {
+		wlr_x11_present_window_get_geometry(pop->xpresent,
+			&pop->root_x, &pop->root_y, &pop->root_w, &pop->root_h);
+		pop->root_box_valid = (pop->root_w > 0 && pop->root_h > 0);
+		return;
+	}
+
+	struct wlx_window *parent = pop->parent;
+	if (!parent) {
+		return;
+	}
+	int16_t ox = 0, oy = 0;
+	if (!window_content_root_position(parent, &ox, &oy)) {
+		return;
+	}
+	struct wlr_box geo = pop->xdg_popup->current.geometry;
+	if (geo.width <= 0 || geo.height <= 0) {
+		geo = pop->xdg_popup->scheduled.geometry;
+	}
+	struct wlx_server *server = pop->server;
+	int surf_w = pop->xdg_popup->base->surface
+		? pop->xdg_popup->base->surface->current.width : 0;
+	int surf_h = pop->xdg_popup->base->surface
+		? pop->xdg_popup->base->surface->current.height : 0;
+	int gw = wlx_scale_size(server, geo.width > 0 ? geo.width : surf_w);
+	int gh = wlx_scale_size(server, geo.height > 0 ? geo.height : surf_h);
+	int gx = wlx_scale_size(server, geo.x);
+	int gy = wlx_scale_size(server, geo.y);
+	if (!server->prefer_csd && parent->toplevel) {
+		struct wlr_box pgeo = parent->toplevel->base->current.geometry;
+		if (pgeo.width > 0 && pgeo.height > 0) {
+			gx = wlx_scale_size(server, geo.x - pgeo.x);
+			gy = wlx_scale_size(server, geo.y - pgeo.y);
+		}
+	}
+	if (gw <= 0 || gh <= 0) {
+		return;
+	}
+	pop->root_x = (int16_t)(ox + gx);
+	pop->root_y = (int16_t)(oy + gy);
+	pop->root_w = gw;
+	pop->root_h = gh;
+	pop->root_box_valid = true;
+}
 
 struct wlx_popup *popup_at_root_pointer(struct wlx_server *server) {
 	if (!server->xcb || xcb_connection_has_error(server->xcb)) {
@@ -458,44 +562,22 @@ struct wlx_popup *popup_at_root_pointer(struct wlx_server *server) {
 	if (!query_root_pointer_position(server, &px, &py)) {
 		return NULL;
 	}
+	/* Newest first (setup_popup inserts at head). */
 	struct wlx_popup *pop;
 	wl_list_for_each(pop, &server->popups, link) {
-		if (!pop->xdg_popup || !pop->parent || !pop->parent->output ||
+		if (!pop->xdg_popup || !pop->xdg_popup->base->surface ||
 				!pop->xdg_popup->base->surface->mapped) {
 			continue;
 		}
-		struct wlx_window *parent = pop->parent;
-		xcb_window_t target = wlr_x11_output_get_window(parent->output);
-		if (target == XCB_WINDOW_NONE) {
-			target = parent->content_xwin != XCB_WINDOW_NONE
-				? parent->content_xwin : parent->xwin;
+		if (!pop->root_box_valid) {
+			popup_update_root_box(pop);
 		}
-		int16_t ox = 0, oy = 0;
-		if (target == XCB_WINDOW_NONE ||
-				!query_window_root_position(server, target, &ox, &oy)) {
+		if (!pop->root_box_valid) {
 			continue;
 		}
-		struct wlr_box geo = pop->xdg_popup->current.geometry;
-		if (geo.width <= 0 || geo.height <= 0) {
-			geo = pop->xdg_popup->scheduled.geometry;
-		}
-		int gw = wlx_scale_size(server, geo.width > 0 ? geo.width :
-			(pop->xdg_popup->base->surface->current.width));
-		int gh = wlx_scale_size(server, geo.height > 0 ? geo.height :
-			(pop->xdg_popup->base->surface->current.height));
-		int gx = wlx_scale_size(server, geo.x);
-		int gy = wlx_scale_size(server, geo.y);
-		/* SSD: parent window is geometry-sized; popup geometry is surface-
-		 * relative so subtract parent window-geometry origin. */
-		if (!server->prefer_csd && parent->toplevel) {
-			struct wlr_box pgeo = parent->toplevel->base->current.geometry;
-			if (pgeo.width > 0 && pgeo.height > 0) {
-				gx = wlx_scale_size(server, geo.x - pgeo.x);
-				gy = wlx_scale_size(server, geo.y - pgeo.y);
-			}
-		}
-		if (px >= ox + gx && py >= oy + gy &&
-				px < ox + gx + gw && py < oy + gy + gh) {
+		if (px >= pop->root_x && py >= pop->root_y &&
+				px < pop->root_x + pop->root_w &&
+				py < pop->root_y + pop->root_h) {
 			return pop;
 		}
 	}
@@ -516,64 +598,367 @@ bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win) 
 	return false;
 }
 
-/* Parent-scene placement: popup lives in the parent's X11 window / scene
- * tree (same model as tinywl/sway). No separate OR output — avoids new
- * wl_output globals, dual-pointer races, and menus that don't track the
- * parent. Trade-off: content that extends past the parent is clipped. */
+/* Present-window placement: OR X11 window in root space so menus are not
+ * clipped by the parent. Scene tree is parked off-layout so parent
+ * scene_outputs do not double-paint it. */
+#define WLX_POPUP_SCENE_PARK_X (-100000)
+#define WLX_POPUP_SCENE_PARK_Y (-100000)
+
+struct popup_render_data {
+	struct wlr_render_pass *pass;
+	struct wlr_renderer *renderer;
+	int origin_lx, origin_ly;
+};
+
+static void popup_render_iterator(struct wlr_scene_buffer *scene_buffer,
+		int lx, int ly, void *user_data) {
+	struct popup_render_data *d = user_data;
+	if (!scene_buffer->buffer) {
+		return;
+	}
+	struct wlr_texture *texture = wlr_texture_from_buffer(d->renderer,
+		scene_buffer->buffer);
+	if (!texture) {
+		return;
+	}
+	int dst_w = scene_buffer->dst_width > 0
+		? scene_buffer->dst_width : scene_buffer->buffer->width;
+	int dst_h = scene_buffer->dst_height > 0
+		? scene_buffer->dst_height : scene_buffer->buffer->height;
+	struct wlr_box dst_box = {
+		.x = lx - d->origin_lx,
+		.y = ly - d->origin_ly,
+		.width = dst_w,
+		.height = dst_h,
+	};
+	float opacity = scene_buffer->opacity;
+	wlr_render_pass_add_texture(d->pass, &(struct wlr_render_texture_options){
+		.texture = texture,
+		.src_box = scene_buffer->src_box,
+		.dst_box = dst_box,
+		.transform = wlr_output_transform_invert(scene_buffer->transform),
+		.alpha = &opacity,
+		.filter_mode = scene_buffer->filter_mode,
+		.blend_mode = WLR_RENDER_BLEND_MODE_PREMULTIPLIED,
+	});
+	wlr_texture_destroy(texture);
+}
+
+static const struct wlr_drm_format *popup_pick_argb_format(
+		struct wlx_server *server) {
+	static const uint32_t caps[] = {
+		WLR_BUFFER_CAP_DMABUF,
+		WLR_BUFFER_CAP_SHM,
+	};
+	for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
+		const struct wlr_drm_format_set *set =
+			wlr_renderer_get_texture_formats(server->renderer, caps[i]);
+		if (!set) {
+			continue;
+		}
+		const struct wlr_drm_format *fmt =
+			wlr_drm_format_set_get(set, DRM_FORMAT_ARGB8888);
+		if (fmt) {
+			return fmt;
+		}
+	}
+	return NULL;
+}
+
+static bool popup_render_and_present(struct wlx_popup *pop) {
+	if (!pop || !pop->xpresent || !pop->scene_tree || !pop->server) {
+		return false;
+	}
+	struct wlx_server *server = pop->server;
+	int32_t width = 0, height = 0;
+	wlr_x11_present_window_get_geometry(pop->xpresent,
+		NULL, NULL, &width, &height);
+	if (width < 1 || height < 1) {
+		return false;
+	}
+
+	/* Fast path: no content scale and a single client buffer of matching size. */
+	struct wlr_surface *surf = pop->xdg_popup && pop->xdg_popup->base
+		? pop->xdg_popup->base->surface : NULL;
+	double scale = server->content_scale > 0.0 ? server->content_scale : 1.0;
+	if (scale == 1.0 && surf && surf->buffer &&
+			surf->buffer->base.width == width &&
+			surf->buffer->base.height == height) {
+		return wlr_x11_present_window_present(pop->xpresent,
+			&surf->buffer->base);
+	}
+
+	const struct wlr_drm_format *fmt = popup_pick_argb_format(server);
+	if (!fmt || !server->allocator || !server->renderer) {
+		/* Fall back to client buffer even if size differs slightly. */
+		if (surf && surf->buffer) {
+			return wlr_x11_present_window_present(pop->xpresent,
+				&surf->buffer->base);
+		}
+		return false;
+	}
+
+	struct wlr_buffer *buf = wlr_allocator_create_buffer(
+		server->allocator, width, height, fmt);
+	if (!buf) {
+		if (surf && surf->buffer) {
+			return wlr_x11_present_window_present(pop->xpresent,
+				&surf->buffer->base);
+		}
+		return false;
+	}
+
+	struct wlr_render_pass *pass = wlr_renderer_begin_buffer_pass(
+		server->renderer, buf, NULL);
+	if (!pass) {
+		wlr_buffer_drop(buf);
+		return false;
+	}
+
+	/* Transparent clear — host compositor blends the OR window. */
+	wlr_render_pass_add_rect(pass, &(struct wlr_render_rect_options){
+		.box = { .x = 0, .y = 0, .width = width, .height = height },
+		.color = { .r = 0, .g = 0, .b = 0, .a = 0 },
+	});
+
+	int origin_lx = 0, origin_ly = 0;
+	wlr_scene_node_coords(&pop->scene_tree->node, &origin_lx, &origin_ly);
+	struct popup_render_data rd = {
+		.pass = pass,
+		.renderer = server->renderer,
+		.origin_lx = origin_lx,
+		.origin_ly = origin_ly,
+	};
+	wlr_scene_node_for_each_buffer(&pop->scene_tree->node,
+		popup_render_iterator, &rd);
+
+	if (!wlr_render_pass_submit(pass)) {
+		wlr_buffer_drop(buf);
+		return false;
+	}
+
+	bool ok = wlr_x11_present_window_present(pop->xpresent, buf);
+	wlr_buffer_drop(buf);
+	return ok;
+}
+
+static void popup_attach_xpresent_listeners(struct wlx_popup *pop) {
+	if (!pop->xpresent) {
+		return;
+	}
+	if (!pop->xpresent_frame.link.prev) {
+		pop->xpresent_frame.notify = popup_handle_xpresent_frame;
+		wlr_x11_present_window_add_frame_listener(pop->xpresent,
+			&pop->xpresent_frame);
+	}
+	if (!pop->xpresent_destroy.link.prev) {
+		pop->xpresent_destroy.notify = popup_handle_xpresent_destroy;
+		wlr_x11_present_window_add_destroy_listener(pop->xpresent,
+			&pop->xpresent_destroy);
+	}
+}
+
+static bool popup_compute_root_placement(struct wlx_popup *pop,
+		int16_t *root_x, int16_t *root_y, int32_t *width, int32_t *height) {
+	struct wlr_xdg_popup *xdg = pop->xdg_popup;
+	if (!xdg || !pop->server) {
+		return false;
+	}
+
+	int lx = xdg->current.geometry.x;
+	int ly = xdg->current.geometry.y;
+	int lw = xdg->current.geometry.width;
+	int lh = xdg->current.geometry.height;
+	if (lw <= 0 || lh <= 0) {
+		lx = xdg->scheduled.geometry.x;
+		ly = xdg->scheduled.geometry.y;
+		lw = xdg->scheduled.geometry.width;
+		lh = xdg->scheduled.geometry.height;
+	}
+	struct wlr_surface *surf = xdg->base->surface;
+	if (lw <= 0 && surf) {
+		lw = surf->current.width;
+	}
+	if (lh <= 0 && surf) {
+		lh = surf->current.height;
+	}
+	if (lw <= 0 || lh <= 0) {
+		return false;
+	}
+
+	struct wlx_server *server = pop->server;
+	int gx = wlx_scale_size(server, lx);
+	int gy = wlx_scale_size(server, ly);
+	int gw = wlx_scale_size(server, lw);
+	int gh = wlx_scale_size(server, lh);
+
+	int16_t ox = 0, oy = 0;
+
+	/* Nested popup: geometry is relative to the parent popup surface.
+	 * Prefer that popup's cached root box so submenus track the menu. */
+	struct wlr_surface *parent_surf = xdg->parent;
+	struct wlr_xdg_surface *parent_xdg = parent_surf
+		? wlr_xdg_surface_try_from_wlr_surface(parent_surf) : NULL;
+	if (parent_xdg && parent_xdg->role == WLR_XDG_SURFACE_ROLE_POPUP &&
+			parent_xdg->data) {
+		struct wlx_popup *parent_pop = parent_xdg->data;
+		if (!parent_pop->root_box_valid) {
+			popup_update_root_box(parent_pop);
+		}
+		if (!parent_pop->root_box_valid) {
+			return false;
+		}
+		ox = parent_pop->root_x;
+		oy = parent_pop->root_y;
+	} else {
+		/* Direct child of a toplevel. */
+		struct wlx_window *parent = pop->parent;
+		if (!parent || !window_content_root_position(parent, &ox, &oy)) {
+			return false;
+		}
+		/* SSD: parent content is window-geometry sized; popup geometry is
+		 * surface-relative — subtract parent geometry origin. */
+		if (!server->prefer_csd && parent->toplevel) {
+			struct wlr_box pgeo = parent->toplevel->base->current.geometry;
+			if (pgeo.width > 0 && pgeo.height > 0) {
+				gx = wlx_scale_size(server, lx - pgeo.x);
+				gy = wlx_scale_size(server, ly - pgeo.y);
+			}
+		}
+	}
+
+	*root_x = (int16_t)(ox + gx);
+	*root_y = (int16_t)(oy + gy);
+	*width = gw > 0 ? gw : 1;
+	*height = gh > 0 ? gh : 1;
+	return true;
+}
+
 static void popup_position_and_map(struct wlx_popup *pop) {
 	struct wlx_window *parent = pop->parent;
-	if (!parent || !parent->scene_tree || !pop->scene_tree) {
+	if (!parent || !pop->scene_tree || !pop->server) {
 		return;
 	}
 
-	struct wlr_xdg_popup *xdg = pop->xdg_popup;
-	int lx = xdg->current.geometry.x;
-	int ly = xdg->current.geometry.y;
-	if (lx == 0 && ly == 0 &&
-			(xdg->scheduled.geometry.x != 0 || xdg->scheduled.geometry.y != 0)) {
-		lx = xdg->scheduled.geometry.x;
-		ly = xdg->scheduled.geometry.y;
+	int16_t root_x = 0, root_y = 0;
+	int32_t width = 1, height = 1;
+	if (!popup_compute_root_placement(pop, &root_x, &root_y, &width, &height)) {
+		wlr_log(WLR_DEBUG, "xdg_popup: cannot compute root placement yet");
+		return;
 	}
 
-	wlr_scene_node_reparent(&pop->scene_tree->node, parent->scene_tree);
-	/* Scene graph is in output pixels when --scale is set. */
-	double scale = pop->server->content_scale > 0.0
-		? pop->server->content_scale : 1.0;
-	int sx = (int)lround(lx * scale);
-	int sy = (int)lround(ly * scale);
-	wlr_scene_node_set_position(&pop->scene_tree->node, sx, sy);
+	/* Park scene off every output's layout region so parent scene_outputs
+	 * do not composite the popup (we Present it ourselves). */
+	wlr_scene_node_reparent(&pop->scene_tree->node, &pop->server->scene->tree);
+	wlr_scene_node_set_position(&pop->scene_tree->node,
+		WLX_POPUP_SCENE_PARK_X, WLX_POPUP_SCENE_PARK_Y);
 	wlr_scene_node_set_enabled(&pop->scene_tree->node, true);
 
 	struct wlr_scene_node *child;
 	wl_list_for_each(child, &pop->scene_tree->children, link) {
 		wlr_scene_node_set_position(child, 0, 0);
 	}
-
-	pop->output = NULL; /* not a separate output */
-
 	wlx_apply_popup_content_scale(pop);
 
-	wlr_log(WLR_INFO, "xdg_popup place in parent scene at (%d,%d) [scaled %d,%d] "
-		"size %dx%d",
-		lx, ly, sx, sy,
-		xdg->base->surface ? xdg->base->surface->current.width : 0,
-		xdg->base->surface ? xdg->base->surface->current.height : 0);
+	if (!pop->xpresent) {
+		pop->xpresent = wlr_x11_present_window_create(pop->server->backend);
+		if (!pop->xpresent) {
+			wlr_log(WLR_ERROR,
+				"xdg_popup: present_window create failed; "
+				"falling back to parent-scene (clipped)");
+			/* Restore parent-scene placement so the menu is at least visible. */
+			if (parent->scene_tree) {
+				wlr_scene_node_reparent(&pop->scene_tree->node,
+					parent->scene_tree);
+				double scale = pop->server->content_scale > 0.0
+					? pop->server->content_scale : 1.0;
+				struct wlr_xdg_popup *xdg = pop->xdg_popup;
+				int lx = xdg->current.geometry.x;
+				int ly = xdg->current.geometry.y;
+				wlr_scene_node_set_position(&pop->scene_tree->node,
+					(int)lround(lx * scale), (int)lround(ly * scale));
+				if (parent->output) {
+					wlr_output_schedule_frame(parent->output);
+				}
+			}
+			popup_update_root_box(pop);
+			return;
+		}
+		popup_attach_xpresent_listeners(pop);
+	}
 
-	if (parent->output) {
-		wlr_output_schedule_frame(parent->output);
+	wlr_x11_present_window_configure(pop->xpresent,
+		root_x, root_y, width, height);
+	wlr_x11_present_window_map(pop->xpresent);
+
+	pop->root_x = root_x;
+	pop->root_y = root_y;
+	pop->root_w = width;
+	pop->root_h = height;
+	pop->root_box_valid = true;
+
+	if (!popup_render_and_present(pop)) {
+		wlr_log(WLR_DEBUG, "xdg_popup: present failed (%dx%d at %d,%d)",
+			width, height, root_x, root_y);
+	} else {
+		wlr_log(WLR_INFO, "xdg_popup present-window %dx%d at root (%d,%d)",
+			width, height, root_x, root_y);
 	}
 }
 
+
 void wlx_reposition_popups_for_window(struct wlx_window *win) {
-	/* Parent-scene popups move with the parent window automatically. */
-	(void)win;
+	if (!win || !win->server) {
+		return;
+	}
+	/* Oldest first so parent menus update root boxes before nested
+	 * submenus that depend on them (list is insert-at-head). */
+	struct wlx_popup *pop;
+	wl_list_for_each_reverse(pop, &win->server->popups, link) {
+		if (pop->parent != win || !pop->xdg_popup ||
+				!pop->xdg_popup->base->surface ||
+				!pop->xdg_popup->base->surface->mapped) {
+			continue;
+		}
+		int16_t rx = 0, ry = 0;
+		int32_t rw = 1, rh = 1;
+		if (!popup_compute_root_placement(pop, &rx, &ry, &rw, &rh)) {
+			continue;
+		}
+		if (pop->xpresent) {
+			wlr_x11_present_window_configure(pop->xpresent,
+				rx, ry, rw, rh);
+		}
+		pop->root_x = rx;
+		pop->root_y = ry;
+		pop->root_w = rw;
+		pop->root_h = rh;
+		pop->root_box_valid = true;
+	}
+}
+
+/* Tear down present-windows for every popup of this toplevel. Safe when
+ * the client still owns the xdg_popup objects (unmap/destroy later). */
+static void destroy_present_windows_for_toplevel(struct wlx_window *win) {
+	if (!win || !win->server) {
+		return;
+	}
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &win->server->popups, link) {
+		if (pop->parent == win) {
+			popup_destroy_xpresent(pop);
+			if (pop->scene_tree) {
+				wlr_scene_node_set_enabled(&pop->scene_tree->node, false);
+			}
+		}
+	}
 }
 
 static void popup_map(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, map);
 	(void)data;
 	struct wlr_surface *surf = pop->xdg_popup->base->surface;
-	wlr_log(WLR_INFO, "xdg_popup map → parent scene (buffer %dx%d)",
+	wlr_log(WLR_INFO, "xdg_popup map → present-window (buffer %dx%d)",
 		surf ? surf->current.width : 0,
 		surf ? surf->current.height : 0);
 	popup_position_and_map(pop);
@@ -594,7 +979,7 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 				pop->xdg_popup->base->surface) {
 		wlr_seat_pointer_clear_focus(pop->server->seat);
 	}
-	popup_destroy_output(pop);
+	popup_destroy_xpresent(pop);
 	if (pop->scene_tree) {
 		wlr_scene_node_set_enabled(&pop->scene_tree->node, false);
 	}
@@ -630,7 +1015,7 @@ static void popup_commit(struct wl_listener *listener, void *data) {
 static void popup_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, destroy);
 	(void)data;
-	popup_destroy_output(pop);
+	popup_destroy_xpresent(pop);
 	if (pop->scene_tree) {
 		wlr_scene_node_destroy(&pop->scene_tree->node);
 		pop->scene_tree = NULL;
@@ -683,7 +1068,7 @@ static void setup_popup(struct wlx_server *server, struct wlr_xdg_popup *xdg_pop
 	pop->new_popup.notify = handle_new_xdg_popup;
 	wl_signal_add(&xdg_popup->base->events.new_popup, &pop->new_popup);
 
-	wlr_log(WLR_INFO, "new xdg_popup (parent scene on map)");
+	wlr_log(WLR_INFO, "new xdg_popup (present-window on map)");
 }
 
 static void handle_new_xdg_popup(struct wl_listener *listener, void *data) {

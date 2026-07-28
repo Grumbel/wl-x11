@@ -344,23 +344,31 @@ struct wlx_window {
 	struct wl_list link;
 };
 
-/* xdg_popup as an override-redirect X11 window (not clipped by parent). */
+/* xdg_popup. Painting may still be parent-scene (clipped) until Phase 3
+ * switches to an OR present-window. When xpresent is non-NULL the popup
+ * has its own X11 window and root_* caches its root-space box for hit-test. */
 struct wlx_popup {
 	struct wlx_server *server;
 	struct wlx_window *parent;
 	struct wlr_xdg_popup *xdg_popup;
 	struct wl_list link; /* server->popups */
 	struct wlr_scene_tree *scene_tree;
-	struct wlr_output *output;
-	struct wlr_output_layout_output *l_output;
-	struct wlr_scene_output *scene_output;
+
+	/* Host X11 window for unclipped menus (NULL while parent-scene path). */
+	struct wlr_x11_present_window *xpresent;
+	/* Cached root-space geometry of the present-window (or of the
+	 * parent-relative box when still parent-scene). Updated on map/
+	 * configure/reposition. */
+	int16_t root_x, root_y;
+	int32_t root_w, root_h;
+	bool root_box_valid;
 
 	struct wl_listener map;
 	struct wl_listener unmap;
 	struct wl_listener destroy;
 	struct wl_listener commit;
-	struct wl_listener output_frame;
-	struct wl_listener output_destroy;
+	struct wl_listener xpresent_frame;
+	struct wl_listener xpresent_destroy;
 	struct wl_listener new_popup; /* nested popups */
 };
 
@@ -389,6 +397,8 @@ xcb_window_t outer_position_window(struct wlx_window *win);
 bool query_window_root_position(struct wlx_server *s, xcb_window_t w, int16_t *x, int16_t *y);
 bool query_window_geometry(struct wlx_server *s, xcb_window_t w, int *width, int *height);
 bool query_root_pointer_position(struct wlx_server *s, int16_t *x, int16_t *y);
+/* Root-space origin of a toplevel's content window (wlroots-owned X id). */
+bool window_content_root_position(struct wlx_window *win, int16_t *x, int16_t *y);
 struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w);
 struct wlx_window *window_from_surface(struct wlr_surface *surface);
 struct wlx_window *window_at_root_pointer(struct wlx_server *server);
