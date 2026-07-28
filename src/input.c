@@ -439,6 +439,11 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 	 * grab, release on the parent is swallowed by wlroots (opening click). */
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 		event->button, event->state);
+	/* Opening click held an implicit X grab; acquire the menu grab now. */
+	if (server->popup_pointer_grab_pending &&
+			server->seat->pointer_state.button_count == 0) {
+		wlx_popup_update_pointer_grab(server);
+	}
 	pointer_enter_surface_under_cursor(server);
 
 	if (server->move_win) {

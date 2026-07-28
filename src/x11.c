@@ -630,8 +630,8 @@ int handle_xcb_readable(int fd, uint32_t mask, void *data) {
 						/* Spurious focus churn inside the same toplevel. */
 					} else if (popup_at_root_pointer(server) ||
 							window_has_mapped_popup(server, win)) {
-						/* Qt/GTK dismiss menus when keyboard focus is
-						 * cleared. Keep focus while a present-window popup is up. */
+						/* Keep keyboard focus while a menu is open; dismiss
+						 * is driven by the X pointer grab + seat, not FocusOut. */
 						wlr_log(WLR_DEBUG, "X11 FocusOut on 0x%x — popup active, "
 							"keeping keyboard focus", fo->event);
 					} else {

@@ -14,6 +14,8 @@
 #include <time.h>
 #include <math.h>
 
+#include <xcb/xinput.h>
+
 #include <wlr/render/allocator.h>
 #include <wlr/render/pass.h>
 #include <wlr/render/wlr_renderer.h>
@@ -602,6 +604,115 @@ bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win) 
 	return false;
 }
 
+void wlx_dismiss_all_popups(struct wlx_server *server) {
+	if (!server) {
+		return;
+	}
+	/* Collect first: destroy mutates server->popups via popup_destroy. */
+	struct wlr_xdg_popup *to_destroy[64];
+	size_t n = 0;
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &server->popups, link) {
+		if (pop->xdg_popup && n < 64) {
+			to_destroy[n++] = pop->xdg_popup;
+		}
+	}
+	for (size_t i = 0; i < n; i++) {
+		wlr_xdg_popup_destroy(to_destroy[i]);
+	}
+}
+
+
+/* X11 menus: active XI2 pointer grab (not core XGrabPointer).
+ *
+ * wlroots' X11 backend delivers input via XI2 only. A core GrabPointer
+ * succeeds but freezes/breaks that path — menus then get no motion.
+ * Toolkits (GTK/Qt on X11) grab the XI2 master pointer instead.
+ *
+ * owner_events=false: every pointer event goes to grab_win (the OR menu).
+ * The compositor still hit-tests with root query_pointer, so both in-menu
+ * motion and outside clicks reach the seat through the present-window.
+ *
+ * Defer while a button is held: the implicit button grab returns
+ * AlreadyGrabbed until the opening click is released. */
+void wlx_popup_update_pointer_grab(struct wlx_server *server) {
+	if (!server || !server->xcb || xcb_connection_has_error(server->xcb)) {
+		return;
+	}
+
+	bool want = false;
+	xcb_window_t grab_win = XCB_WINDOW_NONE;
+	struct wlx_popup *pop;
+	wl_list_for_each(pop, &server->popups, link) {
+		if (!pop->xpresent || !pop->xdg_popup || !pop->xdg_popup->base->surface ||
+				!pop->xdg_popup->base->surface->mapped) {
+			continue;
+		}
+		want = true;
+		grab_win = wlr_x11_present_window_get_xcb(pop->xpresent);
+		if (grab_win != XCB_WINDOW_NONE) {
+			break;
+		}
+	}
+
+	if (!want) {
+		if (server->popup_pointer_grabbed) {
+			xcb_input_xi_ungrab_device(server->xcb,
+				XCB_INPUT_DEVICE_ALL_MASTER, XCB_CURRENT_TIME);
+			xcb_flush(server->xcb);
+			server->popup_pointer_grabbed = false;
+			wlr_log(WLR_DEBUG, "xdg_popup: XI2 pointer ungrab (no menus)");
+		}
+		server->popup_pointer_grab_pending = false;
+		return;
+	}
+
+	if (server->popup_pointer_grabbed) {
+		return;
+	}
+
+	if (server->seat && server->seat->pointer_state.button_count > 0) {
+		server->popup_pointer_grab_pending = true;
+		wlr_log(WLR_DEBUG, "xdg_popup: defer XI2 grab until button release");
+		return;
+	}
+
+	if (grab_win == XCB_WINDOW_NONE) {
+		return;
+	}
+
+	uint32_t mask =
+		XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
+		XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE |
+		XCB_INPUT_XI_EVENT_MASK_MOTION;
+
+	xcb_input_xi_grab_device_cookie_t cookie = xcb_input_xi_grab_device(
+		server->xcb,
+		XCB_INPUT_DEVICE_ALL_MASTER,
+		XCB_CURRENT_TIME,
+		grab_win,
+		XCB_CURSOR_NONE,
+		XCB_INPUT_GRAB_MODE_22_ASYNC,
+		XCB_INPUT_GRAB_MODE_22_ASYNC,
+		false, /* owner_events */
+		1,
+		&mask);
+	xcb_input_xi_grab_device_reply_t *reply =
+		xcb_input_xi_grab_device_reply(server->xcb, cookie, NULL);
+	if (reply && reply->status == XCB_GRAB_STATUS_SUCCESS) {
+		server->popup_pointer_grabbed = true;
+		server->popup_pointer_grab_pending = false;
+		wlr_log(WLR_INFO, "xdg_popup: XI2 pointer grab on 0x%x", grab_win);
+	} else {
+		server->popup_pointer_grab_pending = true;
+		wlr_log(WLR_INFO, "xdg_popup: XI2 grab failed (status=%d), will retry",
+			reply ? (int)reply->status : -1);
+	}
+	free(reply);
+}
+
+
+
 /* Present-window placement: OR X11 window in root space so menus are not
  * clipped by the parent. Scene tree is parked off-layout so parent
  * scene_outputs do not double-paint it. */
@@ -922,6 +1033,7 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 		wlr_log(WLR_INFO, "xdg_popup present-window %dx%d at root (%d,%d)",
 			width, height, root_x, root_y);
 	}
+	wlx_popup_update_pointer_grab(pop->server);
 }
 
 
@@ -1001,6 +1113,7 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 	if (pop->scene_tree) {
 		wlr_scene_node_set_enabled(&pop->scene_tree->node, false);
 	}
+	wlx_popup_update_pointer_grab(pop->server);
 	wlx_pointer_refresh_focus(pop->server);
 }
 
@@ -1035,6 +1148,7 @@ static void popup_destroy(struct wl_listener *listener, void *data) {
 	(void)data;
 	struct wlx_server *server = pop->server;
 	popup_destroy_xpresent(pop);
+	wlx_popup_update_pointer_grab(server);
 	if (pop->scene_tree) {
 		wlr_scene_node_destroy(&pop->scene_tree->node);
 		pop->scene_tree = NULL;

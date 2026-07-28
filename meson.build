@@ -24,6 +24,7 @@ xkbcommon = dependency('xkbcommon')
 pixman = dependency('pixman-1')
 xcb = dependency('xcb')
 xcb_xfixes = dependency('xcb-xfixes')
+xcb_xinput = dependency('xcb-xinput')
 
 # -------------------------------------------------------------------
 # wlroots: patched tree under subprojects/wlroots (MODE before MapWindow,
@@ -91,6 +92,6 @@ wlx_src = files(
 executable(
   'wl-x11',
   wlx_src,
-  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_xfixes],
+  dependencies: [wayland_server, wlroots, xkbcommon, pixman, xcb, xcb_xfixes, xcb_xinput],
   install: true,
 )

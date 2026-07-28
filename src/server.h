@@ -126,6 +126,10 @@ struct wlx_server {
 
 	struct wl_list windows;
 	struct wl_list popups; /* wlx_popup.link */ /* wlx_window::link */
+	/* X pointer grab while present-window menus are mapped. */
+	bool popup_pointer_grabbed;
+	/* Grab was deferred until the opening button is released. */
+	bool popup_pointer_grab_pending;
 	struct wlx_window *focused_window;
 
 	/* Deferred pointer button release: held briefly so the client can
@@ -402,6 +406,8 @@ struct wlx_window *window_from_xwin(struct wlx_server *server, xcb_window_t w);
 struct wlx_window *window_from_surface(struct wlr_surface *surface);
 struct wlx_window *window_at_root_pointer(struct wlx_server *server);
 struct wlx_popup *popup_at_root_pointer(struct wlx_server *server);
+void wlx_dismiss_all_popups(struct wlx_server *server);
+void wlx_popup_update_pointer_grab(struct wlx_server *server);
 /* True if any mapped popup belongs to this toplevel. */
 bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win);
 bool pointer_coords_on_window(struct wlx_server *server, struct wlx_window *win, double *sx, double *sy);
