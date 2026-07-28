@@ -243,19 +243,11 @@ int main(int argc, char **argv) {
 	wl_signal_add(&server.xdg_decoration_manager->events.new_toplevel_decoration,
 		&server.new_toplevel_decoration);
 
-	/* KDE server-decoration: GTK3 (and some GTK4) still prefer this over
-	 * xdg-decoration. Advertise a default mode matching --csd / SSD. */
-	server.server_decoration_manager =
-		wlr_server_decoration_manager_create(server.wl_display);
-	if (server.server_decoration_manager) {
-		wlr_server_decoration_manager_set_default_mode(
-			server.server_decoration_manager,
-			server.prefer_csd
-				? WLR_SERVER_DECORATION_MANAGER_MODE_CLIENT
-				: WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
-		wlr_log(WLR_INFO, "org_kde_kwin_server_decoration default=%s",
-			server.prefer_csd ? "client" : "server");
-	}
+	/* Do NOT advertise org_kde_kwin_server_decoration. Forcing SERVER while
+	 * GTK keeps request_mode(CLIENT) produces a tight mode/request loop
+	 * (megabytes of WAYLAND_DEBUG). xdg-decoration-unstable-v1 covers the
+	 * same need; host chrome is controlled via Motif hints / --csd/--ssd. */
+	server.server_decoration_manager = NULL;
 
 	server.seat = wlr_seat_create(server.wl_display, "seat0");
 	server.cursor = wlr_cursor_create();
