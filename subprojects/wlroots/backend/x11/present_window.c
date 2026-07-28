@@ -73,20 +73,45 @@ struct wlr_x11_present_window *wlr_x11_present_window_create(
 		XCB_WINDOW_CLASS_INPUT_OUTPUT, x11->visualid, mask, values);
 
 	/* EWMH window type: popup menu — informational for host compositors. */
-	if (x11->atoms.net_wm_window_type != XCB_ATOM_NONE &&
-			x11->atoms.net_wm_window_type_popup_menu != XCB_ATOM_NONE) {
-		xcb_atom_t types[] = {
-			x11->atoms.net_wm_window_type_popup_menu,
-			x11->atoms.net_wm_window_type_dropdown_menu,
-			x11->atoms.net_wm_window_type_menu,
-		};
-		xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, win->win,
-			x11->atoms.net_wm_window_type, XCB_ATOM_ATOM, 32,
-			3, types);
+	if (x11->atoms.net_wm_window_type != XCB_ATOM_NONE) {
+		xcb_atom_t types[3];
+		int n = 0;
+		if (x11->atoms.net_wm_window_type_popup_menu != XCB_ATOM_NONE) {
+			types[n++] = x11->atoms.net_wm_window_type_popup_menu;
+		}
+		if (x11->atoms.net_wm_window_type_dropdown_menu != XCB_ATOM_NONE) {
+			types[n++] = x11->atoms.net_wm_window_type_dropdown_menu;
+		}
+		if (x11->atoms.net_wm_window_type_menu != XCB_ATOM_NONE) {
+			types[n++] = x11->atoms.net_wm_window_type_menu;
+		}
+		if (n > 0) {
+			xcb_change_property(x11->xcb, XCB_PROP_MODE_REPLACE, win->win,
+				x11->atoms.net_wm_window_type, XCB_ATOM_ATOM, 32,
+				(uint32_t)n, types);
+		}
 	}
 
 	/* No WM_PROTOCOLS / WM_DELETE_WINDOW: OR menus are not WM-managed.
 	 * No WM_NORMAL_HINTS: compositor positions via ConfigureWindow. */
+
+	/* XI2 must be selected on the OR window itself: when the pointer is
+	 * over the menu, the X server delivers events to this window. Without
+	 * this, motion/button stop while hovering unclipped menus. Events still
+	 * feed the backend's single wlr_pointer (no per-popup device). */
+	struct {
+		xcb_input_event_mask_t head;
+		xcb_input_xi_event_mask_t mask;
+	} xinput_mask = {
+		.head = { .deviceid = XCB_INPUT_DEVICE_ALL_MASTER, .mask_len = 1 },
+		.mask = XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
+			XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE |
+			XCB_INPUT_XI_EVENT_MASK_MOTION |
+			XCB_INPUT_XI_EVENT_MASK_TOUCH_BEGIN |
+			XCB_INPUT_XI_EVENT_MASK_TOUCH_END |
+			XCB_INPUT_XI_EVENT_MASK_TOUCH_UPDATE,
+	};
+	xcb_input_xi_select_events(x11->xcb, win->win, 1, &xinput_mask.head);
 
 	uint32_t present_mask = XCB_PRESENT_EVENT_MASK_IDLE_NOTIFY |
 		XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY;
@@ -94,8 +119,6 @@ struct wlr_x11_present_window *wlr_x11_present_window_create(
 	xcb_present_select_input(x11->xcb, win->present_event_id, win->win,
 		present_mask);
 
-	/* Select structure notify only — pointer routing stays on the
-	 * compositor's single seat / root-query path (no per-window wlr_pointer). */
 	xcb_flush(x11->xcb);
 
 	wl_list_insert(&x11->present_windows, &win->link);

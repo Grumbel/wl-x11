@@ -309,7 +309,6 @@ struct wlx_window {
 	bool hold_present;
 
 	xcb_window_t xwin;
-#define WLX_MAX_RELATED_WINDOWS 32
 	xcb_window_t related[WLX_MAX_RELATED_WINDOWS];
 	int related_count;
 	xcb_window_t content_xwin; /* the real wlroots-owned window, distinct
