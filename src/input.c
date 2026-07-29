@@ -439,6 +439,27 @@ void wlx_pointer_refresh_focus(struct wlx_server *server) {
 	pointer_enter_surface_under_cursor(server);
 }
 
+void wlx_log_seat_buttons(struct wlx_server *server, const char *what,
+		uint32_t button, uint32_t state) {
+	struct wlr_seat_pointer_state *ps = &server->seat->pointer_state;
+	char buf[128];
+	size_t o = 0;
+	for (size_t i = 0; i < ps->button_count && o + 24 < sizeof(buf); i++) {
+		int n = snprintf(buf + o, sizeof(buf) - o, "%s0x%x×%u",
+			i ? "," : "", ps->buttons[i].button, ps->buttons[i].n_pressed);
+		if (n > 0) {
+			o += (size_t)n;
+		}
+	}
+	if (ps->button_count == 0) {
+		snprintf(buf, sizeof(buf), "(none)");
+	}
+	wlr_log(WLR_INFO, "ptr: %s button=0x%x %s → held=[%s] count=%zu grab_btn=0x%x",
+		what, button,
+		state == WL_POINTER_BUTTON_STATE_PRESSED ? "press" : "release",
+		buf, ps->button_count, ps->grab_button);
+}
+
 void server_cursor_button(struct wl_listener *listener, void *data) {
 	struct wlx_server *server = wl_container_of(listener, server, cursor_button);
 	struct wlr_pointer_button_event *event = data;
@@ -450,6 +471,7 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 		pointer_enter_surface_under_cursor(server);
 		wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 			event->button, event->state);
+		wlx_log_seat_buttons(server, "xi2", event->button, event->state);
 		return;
 	}
 
@@ -458,6 +480,7 @@ void server_cursor_button(struct wl_listener *listener, void *data) {
 	 * grab, release on the parent is swallowed by wlroots (opening click). */
 	wlr_seat_pointer_notify_button(server->seat, event->time_msec,
 		event->button, event->state);
+	wlx_log_seat_buttons(server, "xi2", event->button, event->state);
 	/* Opening click held an implicit X grab; acquire the menu grab now. */
 	if (server->popup_pointer_grab_pending &&
 			server->seat->pointer_state.button_count == 0) {

@@ -518,6 +518,8 @@ void wlx_apply_popup_content_scale(struct wlx_popup *pop);
 void wlx_pointer_to_surface(struct wlx_server *server, double *sx, double *sy);
 /* Re-resolve pointer focus from the real X11 pointer (after popup map/unmap). */
 void wlx_pointer_refresh_focus(struct wlx_server *server);
+void wlx_log_seat_buttons(struct wlx_server *server, const char *what,
+		uint32_t button, uint32_t state);
 /* Re-place mapped popups after their parent X11 window moved. */
 void wlx_reposition_popups_for_window(struct wlx_window *win);
 

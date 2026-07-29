@@ -109,25 +109,38 @@ static uint32_t xdg_pointer_grab_button(struct wlr_seat_pointer_grab *grab,
 				break;
 			}
 		}
-		/* Map under held button: ignore until every grabbed popup is mapped. */
+		/* Map under held button: ignore until every grabbed popup is mapped.
+		 * (Seat already recorded this press; matching release will clear it.) */
 		if (any_unmapped) {
 			wlr_log(WLR_INFO, "xdg popup grab: ignoring press "
 				"(popup not mapped yet — likely X11 map under held button)");
 			return 0;
 		}
-		/* button_count already includes this press. count > 1 ⇒ opening
-		 * button still held (press on parent opened the menu). */
-		if (grab->seat->pointer_state.button_count > 1) {
-			wlr_log(WLR_INFO, "xdg popup grab: ignoring press "
-				"(opening button still held, count=%zu)",
-				grab->seat->pointer_state.button_count);
-			return 0;
+		/* Do NOT use button_count > 1 as "opening still held". That treats
+		 * left-open + right-click as a spurious press, leaves the right
+		 * button in the seat pressed set, and later presses are ignored
+		 * forever while count stays elevated.
+		 *
+		 * Only suppress a *repeat* press of the grab/opening button while
+		 * it is still in the seat's pressed set with n_pressed > 1 (duplicate
+		 * delivery). Other buttons (e.g. right) are delivered normally. */
+		struct wlr_seat_pointer_state *ps = &grab->seat->pointer_state;
+		if (button == ps->grab_button) {
+			for (size_t i = 0; i < ps->button_count; i++) {
+				if (ps->buttons[i].button == button &&
+						ps->buttons[i].n_pressed > 1) {
+					wlr_log(WLR_INFO, "xdg popup grab: ignoring duplicate "
+						"press of opening button 0x%x (n_pressed=%zu count=%zu)",
+						button, ps->buttons[i].n_pressed, ps->button_count);
+					return 0;
+				}
+			}
 		}
-		/* Click outside the popup tree: parent toplevel of the same client
-		 * still receives send_button successfully, so "failed serial" is not
-		 * enough — dismiss whenever focus is not a grabbed popup surface. */
+		/* Click outside the popup tree: dismiss. */
 		if (!surface_is_grab_popup(popup_grab, focus)) {
-			wlr_log(WLR_INFO, "xdg popup grab: press outside popup → dismiss");
+			wlr_log(WLR_INFO, "xdg popup grab: press outside popup → dismiss "
+				"(button=0x%x count=%zu grab_button=0x%x)",
+				button, ps->button_count, ps->grab_button);
 			xdg_popup_grab_end(popup_grab);
 			return 0;
 		}

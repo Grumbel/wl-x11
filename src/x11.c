@@ -627,6 +627,7 @@ static void handle_core_pointer_during_grab(struct wlx_server *server,
 				wlx_popup_update_pointer_grab(server);
 			}
 		}
+		wlx_log_seat_buttons(server, "core-grab", button, (uint32_t)state);
 		wlr_seat_pointer_notify_frame(server->seat);
 	}
 }
