@@ -189,7 +189,13 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		bool conf_differs = win->last_client_conf_w <= 0 ||
 			win->last_client_conf_h <= 0 ||
 			conf_dw > 1 || conf_dh > 1;
-		/* Fit/grow host only while we still own size policy. */
+		/* Client asserts a new geometry (not merely acking last_conf): allow
+		 * fit even after a prior size_from_wm. Loop prevention is on the
+		 * request_state side (awaiting_configure after resize_output_to). */
+		bool client_assert = size_mismatch && conf_differs;
+		if (client_assert) {
+			win->size_from_wm = false;
+		}
 		bool fit = size_mismatch && !win->size_from_wm;
 		bool grow = !tiled && !win->size_from_wm &&
 			(out_w > win->output->width + 1 ||
@@ -197,14 +203,14 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		wlr_log(WLR_INFO,
 			"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
 			"output=%dx%d size_from_wm=%d tiled=%d "
-			"mismatch=%d conf_diff=%d fit=%d grow=%d "
+			"mismatch=%d conf_diff=%d client_assert=%d fit=%d grow=%d "
 			"csd_margin=%dx%d",
 			cw, ch, conf_w, conf_h,
 			win->last_client_conf_w, win->last_client_conf_h,
 			win->output->width, win->output->height,
 			(int)win->size_from_wm, (int)tiled,
 			(int)size_mismatch, (int)conf_differs,
-			(int)fit, (int)grow,
+			(int)client_assert, (int)fit, (int)grow,
 			win->csd_margin_w, win->csd_margin_h);
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
 				(fit || grow) && !tiled) {

@@ -308,6 +308,11 @@ struct wlx_window {
 	 * Cleared when the client commits a size we did not request
 	 * (client-driven resize). */
 	bool size_from_wm;
+	/* After resize_output_to from a client fit, wait for matching
+	 * ConfigureNotify before treating other sizes as size_from_wm. */
+	int awaiting_configure_w;
+	int awaiting_configure_h;
+	int awaiting_configure_ignores;
 	/* Last size we sent via wlr_xdg_toplevel_set_size (logical px). Used to
 	 * distinguish client-driven resizes from "client acked our configure". */
 	int last_client_conf_w;

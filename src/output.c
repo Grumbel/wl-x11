@@ -608,11 +608,18 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 	wlr_log(WLR_INFO, "size: resize_output_to %dx%d → %dx%d (size_from_wm=%d)",
 		win->output->width, win->output->height, w, h,
 		(int)win->size_from_wm);
+	/* Expect a ConfigureNotify for this size; other sizes until then are
+	 * treated as in-flight noise, not a user/WM resize. */
+	win->awaiting_configure_w = w;
+	win->awaiting_configure_h = h;
+	win->awaiting_configure_ignores = 0;
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, w, h, 0);
 	if (!wlr_output_commit_state(win->output, &state)) {
 		wlr_log(WLR_ERROR, "size: resize_output_to %dx%d FAILED", w, h);
+		win->awaiting_configure_w = 0;
+		win->awaiting_configure_h = 0;
 	}
 	wlr_output_state_finish(&state);
 	win->last_output_width = win->output->width;

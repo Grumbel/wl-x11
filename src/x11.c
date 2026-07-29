@@ -534,20 +534,65 @@ void output_request_state(struct wl_listener *listener, void *data) {
 
 	wlr_log(WLR_INFO,
 		"size: request_state cur=%dx%d req=%dx%d have_mode=%d "
-		"size_from_wm=%d→1 last_conf=%dx%d committed=0x%x",
+		"size_from_wm=%d last_conf=%dx%d awaiting=%dx%d committed=0x%x",
 		cur_w, cur_h, req_w, req_h, (int)have_mode,
 		(int)win->size_from_wm,
 		win->last_client_conf_w, win->last_client_conf_h,
+		win->awaiting_configure_w, win->awaiting_configure_h,
 		event && event->state ? event->state->committed : 0);
 
-	/* Host WM or user resized the X11 window — stop auto-fitting to
-	 * client geometry on subsequent commits. */
+	/* Confirmation of a compositor-initiated resize: apply if needed, do not
+	 * mark size_from_wm (host is following the client, not the other way). */
+	if (win->awaiting_configure_w > 0 && req_w > 0 &&
+			req_w == win->awaiting_configure_w &&
+			req_h == win->awaiting_configure_h) {
+		wlr_log(WLR_INFO, "size: request_state confirms client fit %dx%d",
+			req_w, req_h);
+		win->awaiting_configure_w = 0;
+		win->awaiting_configure_h = 0;
+		win->awaiting_configure_ignores = 0;
+		if (cur_w != req_w || cur_h != req_h) {
+			wlr_output_commit_state(win->output, event->state);
+		}
+		if (win->output) {
+			wlr_output_schedule_frame(win->output);
+		}
+		return;
+	}
+
+	/* Other ConfigureNotify while a client fit is in flight — drop a few so
+	 * a single conflicting event cannot snap the window back and fight. */
+	if (win->awaiting_configure_w > 0 && req_w > 0) {
+		win->awaiting_configure_ignores++;
+		if (win->awaiting_configure_ignores <= 8) {
+			wlr_log(WLR_INFO, "size: request_state %dx%d ignored "
+				"(awaiting client fit %dx%d, ignore %d/8)",
+				req_w, req_h,
+				win->awaiting_configure_w, win->awaiting_configure_h,
+				win->awaiting_configure_ignores);
+			return;
+		}
+		wlr_log(WLR_INFO, "size: request_state %dx%d accepted after "
+			"awaiting client fit %dx%d timed out",
+			req_w, req_h,
+			win->awaiting_configure_w, win->awaiting_configure_h);
+		win->awaiting_configure_w = 0;
+		win->awaiting_configure_h = 0;
+		win->awaiting_configure_ignores = 0;
+	}
+
+	if (req_w > 0 && req_h > 0 && req_w == cur_w && req_h == cur_h) {
+		wlr_log(WLR_DEBUG, "size: request_state %dx%d matches current (noop)",
+			req_w, req_h);
+		return;
+	}
+
+	/* Genuine host/WM size change. */
 	win->size_from_wm = true;
-	/* Sync maximized/fullscreen from X before applying the size so
-	 * output_commit does not subtract CSD margins on a maximize resize. */
 	win_handle_net_wm_state_notify(win->server, win);
 	wlr_output_commit_state(win->output, event->state);
-	wlr_log(WLR_INFO, "size: request_state after commit output=%dx%d",
+	wlr_log(WLR_INFO, "size: request_state after commit output=%dx%d "
+		"size_from_wm=1",
 		win->output ? win->output->width : 0,
 		win->output ? win->output->height : 0);
 	if (win->output) {
