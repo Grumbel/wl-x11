@@ -13,12 +13,15 @@ the X11 backend freely.
 
 ### Clipboard / DnD scope
 
-Current bridge is text-only (`text/plain` on CLIPBOARD and PRIMARY). Next
-useful steps:
+Bridge is still a **single text blob** on CLIPBOARD and PRIMARY (not binary
+images). Incremental progress:
 
-- Image / HTML MIME on CLIPBOARD
-- Proper inbound XDND as a Wayland drag (needs a synthetic grab serial)
-- `INCR` for large pastes
+- [x] Prefer/export `text/html` as well as `text/plain` (Wayland↔X11); X11
+      TARGETS includes `text/html` atom (same payload — no separate HTML store)
+- [ ] True dual-format store (plain + HTML bodies independently)
+- [ ] Image MIME (`image/png`) on CLIPBOARD
+- [ ] Proper inbound XDND as a Wayland drag (needs a synthetic grab serial)
+- [ ] `INCR` for large pastes
 
 ## Explicitly out of scope (for now)
 
@@ -483,3 +486,7 @@ Reuse `wlr_x11_present_window_*` and the same Present / format fallback as
   path and hit-test order; note KDE server-decoration not advertised.
   `new_subsurface` on toplevel triggers early `wlx_window_sync_subpresents`.
   Open: manual verify only (gedit menubar, GTK/Qt xdg_popup).
+
+- 2026-07-29: Clipboard — advertise/accept `text/html` alongside plain text
+  (same underlying bytes). Popup/subpresent work is verify-only until a host
+  DISPLAY session is used.

@@ -71,6 +71,8 @@ const char *clipboard_pick_mime(struct wlr_data_source *source) {
 	static const char *prefs[] = {
 		"text/plain;charset=utf-8",
 		"text/plain",
+		"text/html;charset=utf-8",
+		"text/html",
 		"TEXT",
 		"STRING",
 		"UTF8_STRING",
@@ -189,6 +191,8 @@ const char *primary_pick_mime(struct wlr_primary_selection_source *source) {
 	static const char *prefs[] = {
 		"text/plain;charset=utf-8",
 		"text/plain",
+		"text/html;charset=utf-8",
+		"text/html",
 		"TEXT",
 		"STRING",
 		"UTF8_STRING",
@@ -328,9 +332,13 @@ void clipboard_offer_x11_text_to_wayland(struct wlx_server *server,
 	ts->server = server;
 	wlr_data_source_init(&ts->base, &text_source_impl);
 
+	/* Same payload for plain and HTML — many X11 apps only store one blob;
+	 * advertising text/html lets GTK/Qt accept the selection more often. */
 	const char *mimes[] = {
 		"text/plain;charset=utf-8",
 		"text/plain",
+		"text/html;charset=utf-8",
+		"text/html",
 	};
 	for (size_t i = 0; i < sizeof(mimes) / sizeof(mimes[0]); i++) {
 		char **slot = wl_array_add(&ts->base.mime_types, sizeof(char *));
@@ -369,6 +377,8 @@ void primary_offer_x11_text_to_wayland(struct wlx_server *server,
 	const char *mimes[] = {
 		"text/plain;charset=utf-8",
 		"text/plain",
+		"text/html;charset=utf-8",
+		"text/html",
 	};
 	for (size_t i = 0; i < sizeof(mimes) / sizeof(mimes[0]); i++) {
 		char **slot = wl_array_add(&ps->base.mime_types, sizeof(char *));
@@ -486,6 +496,7 @@ void clipboard_handle_selection_request(struct wlx_server *server,
 			server->atom_utf8_string,
 			server->atom_string,
 			server->atom_text,
+			server->atom_text_html,
 		};
 		xcb_change_property(server->xcb, XCB_PROP_MODE_REPLACE, req->requestor,
 			req->property, XCB_ATOM_ATOM, 32,
@@ -493,9 +504,13 @@ void clipboard_handle_selection_request(struct wlx_server *server,
 		notify.property = req->property;
 	} else if (req->target == server->atom_utf8_string ||
 			req->target == server->atom_string ||
-			req->target == server->atom_text) {
+			req->target == server->atom_text ||
+			req->target == server->atom_text_html) {
 		xcb_atom_t type = (req->target == server->atom_string)
-			? server->atom_string : server->atom_utf8_string;
+			? server->atom_string
+			: ((req->target == server->atom_text_html)
+				? server->atom_text_html
+				: server->atom_utf8_string);
 		xcb_change_property(server->xcb, XCB_PROP_MODE_REPLACE, req->requestor,
 			req->property, type, 8, (uint32_t)out_len, out);
 		notify.property = req->property;
@@ -524,6 +539,7 @@ bool clipboard_init(struct wlx_server *server, xcb_screen_t *screen) {
 	server->atom_targets = intern_atom(server->xcb, "TARGETS");
 	server->atom_string = intern_atom(server->xcb, "STRING");
 	server->atom_text = intern_atom(server->xcb, "TEXT");
+	server->atom_text_html = intern_atom(server->xcb, "text/html");
 	server->atom_wlx_clipboard = intern_atom(server->xcb, "_WLX_CLIPBOARD");
 	server->atom_wlx_primary = intern_atom(server->xcb, "_WLX_PRIMARY");
 

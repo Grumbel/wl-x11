@@ -219,6 +219,7 @@ struct wlx_server {
 	xcb_atom_t atom_targets;
 	xcb_atom_t atom_string;
 	xcb_atom_t atom_text;
+	xcb_atom_t atom_text_html; /* MIME text/html for TARGETS */
 	xcb_atom_t atom_wlx_clipboard; /* property used for ConvertSelection */
 	xcb_atom_t atom_wlx_primary;
 
