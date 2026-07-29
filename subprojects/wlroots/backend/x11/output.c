@@ -779,9 +779,11 @@ void handle_x11_configure_notify(struct wlr_x11_output *output,
 	wlr_log(WLR_INFO, "x11: ConfigureNotify %dx%d (was %dx%d) → request_state",
 		ev->width, ev->height, output->win_width, output->win_height);
 
-	output->win_width = ev->width;
-	output->win_height = ev->height;
-
+	/* Do not update win_width/height here. The compositor may ignore this
+	 * request_state (e.g. while awaiting a client-driven fit). Optimistic
+	 * updates left the backend believing the rejected size while wlr_output
+	 * kept the client size. win_* is updated in output_set_custom_mode when
+	 * a mode is actually committed. */
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, ev->width, ev->height, 0);

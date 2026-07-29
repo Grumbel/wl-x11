@@ -4,6 +4,8 @@
 
 #include "server.h"
 
+#include <wlr/backend/x11.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <linux/input-event-codes.h>
@@ -570,6 +572,27 @@ void output_request_state(struct wl_listener *listener, void *data) {
 				req_w, req_h,
 				win->awaiting_configure_w, win->awaiting_configure_h,
 				win->awaiting_configure_ignores);
+			/* Re-assert desired size on first conflict so the host WM does
+			 * not leave the X window at the old dimensions. Always send
+			 * ConfigureWindow even if wlr_output already reports that size. */
+			if (win->awaiting_configure_ignores == 1 && win->output &&
+					wlr_output_is_x11(win->output) && win->server->xcb) {
+				xcb_window_t xw = wlr_x11_output_get_window(win->output);
+				if (xw != XCB_WINDOW_NONE) {
+					const uint32_t vals[] = {
+						(uint32_t)win->awaiting_configure_w,
+						(uint32_t)win->awaiting_configure_h,
+					};
+					xcb_configure_window(win->server->xcb, xw,
+						XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+						vals);
+					xcb_flush(win->server->xcb);
+					wlr_log(WLR_INFO, "size: re-assert ConfigureWindow %dx%d "
+						"on 0x%x",
+						win->awaiting_configure_w,
+						win->awaiting_configure_h, xw);
+				}
+			}
 			return;
 		}
 		wlr_log(WLR_INFO, "size: request_state %dx%d accepted after "
