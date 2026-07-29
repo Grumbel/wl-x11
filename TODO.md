@@ -478,3 +478,8 @@ Reuse `wlr_x11_present_window_*` and the same Present / format fallback as
   converted into parent-surface coordinates; nested menus use parent popup
   root box. Remaining open: manual verify (gedit menubar subpresent, GTK/Qt
   xdg_popup), present-window unit smoke under DISPLAY.
+
+- 2026-07-29: Docs — AGENTS.md / README.md describe subsurface→present-window
+  path and hit-test order; note KDE server-decoration not advertised.
+  `new_subsurface` on toplevel triggers early `wlx_window_sync_subpresents`.
+  Open: manual verify only (gedit menubar, GTK/Qt xdg_popup).

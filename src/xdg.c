@@ -58,6 +58,14 @@ void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	}
 }
 
+
+static void window_new_subsurface(struct wl_listener *listener, void *data) {
+	struct wlx_window *win = wl_container_of(listener, win, new_subsurface);
+	(void)data;
+	/* Subsurface may map/commit soon; sync promotes overflow to present-window. */
+	wlx_window_sync_subpresents(win);
+}
+
 void surface_commit(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, commit);
 	wlr_log(WLR_DEBUG, "surface commit (mapped=%d, has_buffer=%d)",
@@ -289,6 +297,7 @@ void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&win->unmap.link);
 	wl_list_remove(&win->destroy.link);
 	wl_list_remove(&win->commit.link);
+	wl_list_remove(&win->new_subsurface.link);
 	wl_list_remove(&win->request_move.link);
 	wl_list_remove(&win->request_resize.link);
 	wl_list_remove(&win->request_maximize.link);
@@ -407,6 +416,9 @@ void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&toplevel->events.destroy, &win->destroy);
 	win->commit.notify = surface_commit;
 	wl_signal_add(&toplevel->base->surface->events.commit, &win->commit);
+	win->new_subsurface.notify = window_new_subsurface;
+	wl_signal_add(&toplevel->base->surface->events.new_subsurface,
+		&win->new_subsurface);
 
 	win->request_move.notify = toplevel_request_move;
 	wl_signal_add(&toplevel->events.request_move, &win->request_move);

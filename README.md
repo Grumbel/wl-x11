@@ -110,24 +110,29 @@ This is intentionally minimal, in the spirit of a "one file you can read
 in one sitting" compositor (à la wlroots' `tinywl.c`), adapted to the
 one-window-per-toplevel model.
 
-### Popups
+### Popups and menubar subsurfaces
 
-`xdg_popup` surfaces (menus, combo dropdowns, tooltips) use **rootless
-override-redirect present-windows** (`wlr_x11_present_window`): each menu is
-a separate X11 OR window, so content is **not clipped** by the parent frame.
-There is no extra `wl_output` global or seat pointer device per popup.
+Menus that must leave the parent frame use **rootless override-redirect
+present-windows** (`wlr_x11_present_window`):
 
-Input is hit-tested in root X11 coordinates (popups first, then toplevels).
-Menus reposition when the parent moves; they are destroyed with the parent.
-If present-window creation fails, the compositor falls back to parent-scene
-placement (clipped). See [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
+- **`xdg_popup`** — Qt menus, many GTK context menus
+- **Overflowing `wl_subsurface`** — GTK menubar dropdowns (e.g. gedit), which
+  are *not* xdg_popups and would otherwise be clipped to the toplevel X11
+  window
+
+There is no extra `wl_output` global or seat pointer device per menu. Input
+is hit-tested in root X11 coordinates (xdg_popup presents, then subsurface
+presents, then toplevels). Menus reposition when the parent moves and are
+destroyed with the parent. See [AGENTS.md](AGENTS.md) and [TODO.md](TODO.md).
 
 ### Decorations
 
 By default the compositor prefers **server-side decorations** (host WM
-chrome) via `xdg-decoration` and `org_kde_kwin_server_decoration`. Pass
-`--csd` for client-side decorations (client-drawn title/shadows; host frame
-suppressed where possible). `--ssd` is explicit for the default.
+chrome) via `xdg-decoration-unstable-v1`. Pass `--csd` for client-side
+decorations (client-drawn title/shadows; host frame suppressed where
+possible). `--ssd` is explicit for the default. The older KDE
+`org_kde_kwin_server_decoration` global is **not** advertised (it caused a
+tight request_mode/mode loop with GTK).
 
 ### Other limitations
 

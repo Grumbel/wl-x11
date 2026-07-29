@@ -341,6 +341,7 @@ struct wlx_window {
 	struct wl_listener request_fullscreen;
 	struct wl_listener request_minimize;
 	struct wl_listener new_popup;
+	struct wl_listener new_subsurface;
 
 	struct wl_listener output_frame;
 	struct wl_listener output_destroy;
