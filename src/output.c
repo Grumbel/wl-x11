@@ -186,7 +186,8 @@ void output_commit(struct wl_listener *listener, void *data) {
 		wlr_output_schedule_frame(win->output);
 	}
 
-	wlr_log(WLR_DEBUG, "X11 window resized to %dx%d, propagating to toplevel", w, h);
+	wlr_log(WLR_INFO, "size: output_commit %dx%d → toplevel (size_from_wm=%d)",
+		w, h, (int)win->size_from_wm);
 	if (win->toplevel) {
 		/* Client sees logical window geometry; host may be larger by CSD
 		 * shadow margin. Maximized/fullscreen drop the shadow — never
@@ -214,6 +215,10 @@ void output_commit(struct wl_listener *listener, void *data) {
 				lh = 1;
 			}
 		}
+		wlr_log(WLR_INFO, "size: output_commit set_size %dx%d "
+			"(margin %dx%d, csd=%d)",
+			lw, lh, win->csd_margin_w, win->csd_margin_h,
+			win->server ? (int)win->server->prefer_csd : 0);
 		wlx_toplevel_set_size(win, lw, lh);
 	}
 	/* Keep host WM constraints aligned with the new size / xdg min-max. */

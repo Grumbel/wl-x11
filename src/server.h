@@ -305,13 +305,9 @@ struct wlx_window {
 	/* Once the host WM (or interactive resize) changes the X11 window
 	 * size we stop auto-fitting the output to the client's geometry, so
 	 * a user-enlarged window is not yanked back down on the next commit.
-	 * Cleared only after the client *insists* on another size for several
-	 * consecutive commits (see client_size_insist) — avoids WM↔client
-	 * feedback loops when both sides keep applying different sizes. */
+	 * Cleared when the client commits a size we did not request
+	 * (client-driven resize). */
 	bool size_from_wm;
-	/* Consecutive commits where client geometry ≠ last configure while
-	 * size_from_wm. Adopt client size only after threshold. */
-	int client_size_insist;
 	/* Last size we sent via wlr_xdg_toplevel_set_size (logical px). Used to
 	 * distinguish client-driven resizes from "client acked our configure". */
 	int last_client_conf_w;

@@ -14,32 +14,25 @@ the X11 backend freely.
 ## Size negotiation (client ↔ host WM)
 
 Rare feedback loop: client commits preferred size A while host WM keeps
-size B → `surface_commit` fits to A (`client_driven`) → WM Configure back
-to B (`output_request_state` / `size_from_wm`) → client commits A again.
+size B → `surface_commit` fits to A → WM Configure back to B
+(`output_request_state` / `size_from_wm`) → client commits A again.
 
-Mitigations (2026-07-29):
+A multi-commit "insist" delay was tried and **removed** (felt laggy / hacky).
 
-- [x] 1px hysteresis on host vs preferred and on configure vs last
-- [x] While `size_from_wm`, require **3 consecutive** committing mismatches
-      (`client_size_insist`) before adopting client size and clearing the flag
-- [x] Reset insist counter on host `request_state` / maximize / fullscreen
-- [x] Avoid redundant `set_size` after `resize_output_to` when configure
-      already matches
-- [ ] Manual verify: Qt apps that used to oscillate; intentional client
-      resize still applies within a few commits
+Diagnostics (log prefix `size:` at INFO):
 
+- `size: commit …` — preferred/conf/last_conf/output and decision flags
+- `size: fit host output →` — compositor resizing X11 toward client
+- `size: hold host size` — size_from_wm blocked a fit
+- `size: host request_state` — WM-driven resize
+- `size: output_commit … set_size` — configure pushed to client
 
-### Clipboard / DnD scope
+Still open:
 
-Bridge is still a **single text blob** on CLIPBOARD and PRIMARY (not binary
-images). Incremental progress:
+- [ ] Capture a full `size:` sequence during a loop and fix the root cause
+      (likely CSD margin, scale rounding, or WM clamp vs preferred size)
+- [x] 1px hysteresis on mismatch detection (kept; not a delay)
 
-- [x] Prefer/export `text/html` as well as `text/plain` (Wayland↔X11); X11
-      TARGETS includes `text/html` atom (same payload — no separate HTML store)
-- [ ] True dual-format store (plain + HTML bodies independently)
-- [ ] Image MIME (`image/png`) on CLIPBOARD
-- [ ] Proper inbound XDND as a Wayland drag (needs a synthetic grab serial)
-- [ ] `INCR` for large pastes
 
 ## Explicitly out of scope (for now)
 
