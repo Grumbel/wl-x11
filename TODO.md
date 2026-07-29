@@ -13,31 +13,18 @@ the X11 backend freely.
 
 ## Size negotiation (client ↔ host WM)
 
-Log pattern of the loop:
+Loop (log evidence): client prefers 653 → `resize_output_to(653)` → X
+`ConfigureNotify 719` (seq *newer* than our configure — not caught by stale
+seq filter) → `request_state`/`size_from_wm` → `set_size(719)` → client still
+prefers 653 → **client_driven cleared size_from_wm and fit again** → repeat.
 
-```
-resize_output_to 562x697 → 557x345
-output_commit 557x345 / set_size 557x345
-request_state cur=557x345 req=562x697   ← previous size
-output_commit 562x697 / set_size 562x697
-commit preferred=557x345 → fit again …
-```
-
-Cause: X11 `ConfigureNotify` can arrive **out of order**. The backend used to
-always `request_state` on every notify, so a stale event restored the old size.
-
-Compositor-side “ignore prev size” filters were tried and removed (too sticky).
-
-Proper fix (vendored wlroots `backend/x11/output.c`):
-
-- [x] Record sequence of our `ConfigureWindow` in `output_set_custom_mode`
-- [x] In `handle_x11_configure_notify`, drop events with `sequence` older than
-      that configure (stale)
-- [x] Drop notifies that already match `win_width/height` (echo — no
-      `request_state`)
-- [x] Only then emit `request_state` (real WM/user resize)
-- [ ] Rebuild with vendored wlroots and confirm `x11: ignore stale
-      ConfigureNotify` appears instead of the loop
+- [x] Backend: ignore ConfigureNotify with seq < last ConfigureWindow
+- [x] Backend: ignore echo when size matches win_width/height
+- [x] Compositor: **do not** let client preferred size override `size_from_wm`
+      (removed client_driven fit / clear). While size_from_wm, log
+      `size: hold host size` instead of fighting.
+- [ ] Manual verify: one bounce max then hold; interactive WM resize still
+      updates client via set_size; initial map (size_from_wm=0) still fits.
 
 
 ## Explicitly out of scope (for now)

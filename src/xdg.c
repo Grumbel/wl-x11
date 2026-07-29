@@ -151,11 +151,12 @@ void surface_commit(struct wl_listener *listener, void *data) {
 	 *  --csd: buffer-sized so client shadows stay visible
 	 *  SSD:   geometry-sized so leftover client shadow margins are clipped
 	 *
-	 * size_from_wm: host WM chose the size — do not yank the window back
-	 * when the client merely acks that configure. If the client commits a
-	 * *different* size than we last requested (client-driven resize),
-	 * adopt it on the host. 1px hysteresis avoids scale/border noise.
-	 * Log at INFO when host and client disagree so size fights are visible. */
+	 * size_from_wm: host WM (or a post-configure X size) owns the window
+	 * dimensions. Do *not* let client preferred size override that — doing so
+	 * caused a tight loop when ConfigureNotify restored the previous size
+	 * (client prefers A, we resize to A, X reports B, we set_size(B), client
+	 * still prefers A, …). 1px hysteresis avoids scale/border noise.
+	 */
 	if (win->output && win->toplevel) {
 		int cw = 0, ch = 0;
 		toplevel_preferred_size(win, &cw, &ch);
@@ -188,39 +189,25 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		bool conf_differs = win->last_client_conf_w <= 0 ||
 			win->last_client_conf_h <= 0 ||
 			conf_dw > 1 || conf_dh > 1;
-		/* Client-driven when committed size is not what we last asked for. */
-		bool client_driven = size_mismatch && conf_differs;
-		bool grow = !tiled &&
+		/* Fit/grow host only while we still own size policy. */
+		bool fit = size_mismatch && !win->size_from_wm;
+		bool grow = !tiled && !win->size_from_wm &&
 			(out_w > win->output->width + 1 ||
 			 out_h > win->output->height + 1);
-		bool fit = size_mismatch &&
-			(!win->size_from_wm || client_driven);
 		wlr_log(WLR_INFO,
 			"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
 			"output=%dx%d size_from_wm=%d tiled=%d "
-			"mismatch=%d conf_diff=%d client_driven=%d fit=%d grow=%d "
+			"mismatch=%d conf_diff=%d fit=%d grow=%d "
 			"csd_margin=%dx%d",
 			cw, ch, conf_w, conf_h,
 			win->last_client_conf_w, win->last_client_conf_h,
 			win->output->width, win->output->height,
 			(int)win->size_from_wm, (int)tiled,
 			(int)size_mismatch, (int)conf_differs,
-			(int)client_driven, (int)fit, (int)grow,
+			(int)fit, (int)grow,
 			win->csd_margin_w, win->csd_margin_h);
-		if (client_driven) {
-			win->size_from_wm = false;
-		}
 		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
 				(fit || grow) && !tiled) {
-			if (grow && win->size_from_wm && !client_driven) {
-				/* Only expand for CSD margins while WM still owns size. */
-				if (out_w < win->output->width) {
-					out_w = win->output->width;
-				}
-				if (out_h < win->output->height) {
-					out_h = win->output->height;
-				}
-			}
 			wlr_log(WLR_INFO, "size: fit host output → %dx%d "
 				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
 				out_w, out_h, conf_w, conf_h,
@@ -235,9 +222,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 				wlr_scene_node_set_position(&win->scene_tree->node,
 					win->l_output->x, win->l_output->y);
 			}
-		} else if (size_mismatch && win->size_from_wm && !client_driven) {
-			wlr_log(WLR_INFO, "size: hold host size (size_from_wm, client "
-				"acked or within hysteresis)");
+		} else if (size_mismatch && win->size_from_wm) {
+			wlr_log(WLR_INFO, "size: hold host size (size_from_wm=1, "
+				"preferred %dx%d vs output %dx%d)",
+				cw, ch, win->output->width, win->output->height);
 		}
 	}
 
