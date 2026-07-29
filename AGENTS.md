@@ -21,11 +21,20 @@ is tracked in [TODO.md](TODO.md) — read that before starting larger changes.
 After **every** meaningful change made in a chat session, write a **detailed
 git commit** (do not batch unrelated work into one vague message).
 
-- Prefer one logical change per commit when practical.
-- Subject line: imperative, specific (e.g. `Promote overflowing subsurfaces to present-windows`).
-- Body should explain **why**, not only what: problem, approach, files touched,
-  intentional non-goals, and any follow-up / known gaps.
+- Prefer one logical change per commit when practical. If the session mixed
+  unrelated topics (e.g. size negotiation + popup input), split messages
+  (and commits) accordingly.
+- Subject line: imperative, specific, ≤72 chars when possible
+  (e.g. `Promote overflowing subsurfaces to present-windows`).
+- Body structure:
+  1. **Problem** — failure mode, log evidence, or user-visible bug
+  2. **Approach** — what changed and why that is the right layer
+    (compositor vs vendored wlroots backend)
+  3. **Scope** — important paths/symbols; intentional non-goals
+  4. **Follow-up** — remaining risk, manual verify, or TODO.md pointers
 - Reference design docs when relevant (`TODO.md` phases, AGENTS rules).
+- Call out **vendored** edits under `subprojects/wlroots/` explicitly so
+  packagers know a wlroots rebuild is required.
 - If the user did not ask to run `git commit`, still **prepare** the full
   message in the reply so it can be committed immediately.
 
