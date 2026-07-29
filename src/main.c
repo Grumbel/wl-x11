@@ -227,6 +227,7 @@ int main(int argc, char **argv) {
 
 	wl_list_init(&server.windows);
 	wl_list_init(&server.popups);
+	wl_list_init(&server.subpresents);
 
 	/* Version ≥ 5 for xdg_toplevel.wm_capabilities (GTK/libadwaita CSD). */
 	server.xdg_shell = wlr_xdg_shell_create(server.wl_display, 5);

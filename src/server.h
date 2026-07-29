@@ -125,7 +125,8 @@ struct wlx_server {
 	struct wl_listener start_drag;
 
 	struct wl_list windows;
-	struct wl_list popups; /* wlx_popup.link */ /* wlx_window::link */
+	struct wl_list popups; /* wlx_popup.link */
+	struct wl_list subpresents; /* wlx_subpresent.link */
 	/* X pointer grab while present-window menus are mapped. */
 	bool popup_pointer_grabbed;
 	/* Grab was deferred until the opening button is released. */
@@ -410,6 +411,16 @@ struct wlx_window *window_at_root_pointer(struct wlx_server *server);
 struct wlx_popup *popup_at_root_pointer(struct wlx_server *server);
 void wlx_dismiss_all_popups(struct wlx_server *server);
 void wlx_popup_update_pointer_grab(struct wlx_server *server);
+
+/* Overflowing wl_subsurface → present-window (GTK menubar). */
+struct wlx_subpresent;
+void wlx_window_sync_subpresents(struct wlx_window *win);
+void wlx_window_destroy_subpresents(struct wlx_window *win);
+void wlx_window_reposition_subpresents(struct wlx_window *win);
+struct wlx_subpresent *subpresent_at_root_pointer(struct wlx_server *server);
+struct wlr_surface *subpresent_surface_at(struct wlx_subpresent *sp,
+		double *sx, double *sy);
+struct wlx_window *subpresent_parent(struct wlx_subpresent *sp);
 /* True if any mapped popup belongs to this toplevel. */
 bool window_has_mapped_popup(struct wlx_server *server, struct wlx_window *win);
 bool pointer_coords_on_window(struct wlx_server *server, struct wlx_window *win, double *sx, double *sy);

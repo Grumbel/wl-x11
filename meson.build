@@ -84,6 +84,7 @@ wlx_src = files(
   'src/move_resize.c',
   'src/output.c',
   'src/xdg.c',
+  'src/subpresent.c',
   'src/input.c',
   'src/clipboard.c',
   'src/dnd.c',

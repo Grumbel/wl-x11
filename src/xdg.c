@@ -48,6 +48,7 @@ void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 
 void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, unmap);
+	wlx_window_destroy_subpresents(win);
 	/* Present-windows first so OR X11 windows cannot outlive the parent. */
 	destroy_present_windows_for_toplevel(win);
 	if (win->output) {
@@ -261,11 +262,15 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		xwin_set_class(win->server, win->content_xwin, app_id);
 		snprintf(win->last_app_id, sizeof(win->last_app_id), "%s", app_id);
 	}
+
+	/* GTK menubar menus are often overflowing wl_subsurfaces — promote. */
+	wlx_window_sync_subpresents(win);
 }
 
 void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, destroy);
 
+	wlx_window_destroy_subpresents(win);
 	destroy_present_windows_for_toplevel(win);
 	if (win->output) {
 		wlr_output_destroy(win->output);
@@ -1059,6 +1064,8 @@ void wlx_reposition_popups_for_window(struct wlx_window *win) {
 		pop->root_h = rh;
 		pop->root_box_valid = true;
 	}
+	wlx_window_reposition_subpresents(win);
+
 }
 
 /* Tear down present-windows for every popup of this toplevel. Safe when

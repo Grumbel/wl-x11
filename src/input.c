@@ -110,6 +110,25 @@ static struct wlr_surface *surface_under_root_pointer(
 		return surface;
 	}
 
+	/* --- Overflowing subsurface present-windows (GTK menubar) --- */
+	struct wlx_subpresent *sp = subpresent_at_root_pointer(server);
+	if (sp) {
+		double sx = 0, sy = 0;
+		struct wlr_surface *surface = subpresent_surface_at(sp, &sx, &sy);
+		if (surface) {
+			if (sx_out) {
+				*sx_out = sx;
+			}
+			if (sy_out) {
+				*sy_out = sy;
+			}
+			if (win_out) {
+				*win_out = subpresent_parent(sp);
+			}
+			return surface;
+		}
+	}
+
 	/* --- Toplevel content windows --- */
 	struct wlx_window *under = window_at_root_pointer(server);
 	if (!under || !under->toplevel) {

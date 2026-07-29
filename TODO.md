@@ -402,3 +402,74 @@ how X11 menus actually work.
 - 2026-07-28: Phase 6 cleanup & policy:
   - AGENTS.md documents present-window rules; parent-scene is fallback only
   - Dual-device / per-popup wlr_output approach fully superseded
+
+
+---
+
+## Subsurface overflow → present-window (GTK menubar menus)
+
+### Problem (confirmed 2026-07-28)
+
+GTK menubar dropdowns (gedit) are **not** `xdg_popup`. WAYLAND_DEBUG shows:
+
+```
+wl_subcompositor.get_subsurface(sub, menu_surface, toplevel_surface)
+wl_subsurface.set_position(x, -280)   # above parent origin
+```
+
+No `xdg_surface.get_popup`. Protocol does **not** require clipping subsurfaces
+to the parent buffer; Weston paints overflow on the large output. wl-x11 maps
+each toplevel to a **small X11 window (= wlr_output)** sized to the client
+geometry, so subsurface pixels at negative Y fall outside the output and
+vanish. Scene `set_clip` is not the cause (unused); the host window size is.
+
+Context menus that use `xdg_popup` already work via present-window.
+
+### Chosen approach (not parent expand)
+
+**Promote overflowing subsurfaces to OR present-windows** — same host model as
+`xdg_popup`. Do **not** grow the toplevel X11 window (host WM flicker,
+`size_from_wm` / SSD math, position thrash on every `set_position`).
+
+### Design
+
+| Step | Action |
+|------|--------|
+| Detect | On toplevel (and subsurface) commit: `wlr_surface_for_each_surface`; any child whose box is not ⊆ parent buffer rect is an overflow candidate |
+| Map | Create `wlr_x11_present_window`; root position = content root + scaled(subsurface offset); present client buffer |
+| Scene | Disable the scene buffer node for that surface so the parent output does not double-paint a clipped copy |
+| Input | Root hit-test: subpresent boxes after xdg_popup presents, before toplevels |
+| Unmap | Subsurface gone / fully inside bounds → destroy present-window, re-enable scene node |
+| Parent lifecycle | Toplevel unmap/destroy tears down all subpresents for that window |
+
+Reuse `wlr_x11_present_window_*` and the same Present / format fallback as
+`popup_render_and_present`. No new `wlr_output` / `wl_output` / seat device.
+
+### Implementation phases
+
+#### Phase S0 — Spec (this section)
+- [x] Confirm subsurface path via WAYLAND_DEBUG (gedit)
+- [x] Prefer present-window promotion over parent expand
+- [x] Document detection / scene disable / input order
+
+#### Phase S1 — Data model + sync
+- [x] `struct wlx_subpresent` + `server->subpresents` list
+- [x] `wlx_window_sync_subpresents(win)` from `surface_commit` / unmap
+- [x] Create/configure/map/present OR window; destroy on demote
+- [x] Disable matching scene buffer node while presented
+
+#### Phase S2 — Input
+- [x] `subpresent_at_root_pointer` + include in `surface_under_root_pointer`
+- [x] Motion/button use existing seat path (no extra grab unless needed)
+
+#### Phase S3 — Lifecycle polish
+- [x] Parent destroy / output destroy cleanup
+- [x] Nested subsurface offsets (for_each_surface accumulates)
+- [ ] Manual verify: gedit menubar unclipped; Qt/xdg_popup unchanged
+
+### Progress log
+
+- 2026-07-29: Plan locked; implementation starts Phase S1.
+- 2026-07-29: Phase S1–S2 landed (`src/subpresent.c`): overflow subsurfaces
+  get OR present-windows; scene node disabled; root hit-test wired.
+  Awaiting manual gedit menubar verify.
