@@ -13,25 +13,23 @@ the X11 backend freely.
 
 ## Size negotiation (client ↔ host WM)
 
-Rare feedback loop: client commits preferred size A while host WM keeps
-size B → `surface_commit` fits to A → WM Configure back to B
-(`output_request_state` / `size_from_wm`) → client commits A again.
+Observed loop: `resize_output_to(A)` then `request_state` applies previous
+size B → `set_size(B)` → client still prefers A → repeat.
 
-A multi-commit "insist" delay was tried and **removed** (felt laggy / hacky).
+Stale-configure *filters* (ignore prev / insist counters) were tried and
+**removed** — too sticky, blocked real resizes.
 
-Diagnostics (log prefix `size:` at INFO):
+Diagnostics only for now (`size:` at INFO):
 
-- `size: commit …` — preferred/conf/last_conf/output and decision flags
-- `size: fit host output →` — compositor resizing X11 toward client
-- `size: hold host size` — size_from_wm blocked a fit
-- `size: host request_state` — WM-driven resize
-- `size: output_commit … set_size` — configure pushed to client
+- `size: commit …` — preferred/conf/last_conf/output + decision flags
+- `size: resize_output_to …` — compositor initiating host resize
+- `size: request_state cur=… req=…` — backend-detected X configure
+- `size: request_state after commit output=…`
+- `size: output_commit …` / `size: set_size …`
 
-Still open:
-
-- [ ] Capture a full `size:` sequence during a loop and fix the root cause
-      (likely CSD margin, scale rounding, or WM clamp vs preferred size)
-- [x] 1px hysteresis on mismatch detection (kept; not a delay)
+- [ ] Capture a full sequence and fix the root cause without ignoring
+      configures (likely: do not `set_size` from `output_commit` when the
+      resize was compositor-initiated, or coalesce configure serials)
 
 
 ## Explicitly out of scope (for now)

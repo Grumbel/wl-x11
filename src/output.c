@@ -315,6 +315,9 @@ void wlx_toplevel_set_size(struct wlx_window *win, int width, int height) {
 	if (!win || !win->toplevel) {
 		return;
 	}
+	wlr_log(WLR_INFO, "size: set_size %dx%d → %dx%d (was last_conf %dx%d)",
+		win->last_client_conf_w, win->last_client_conf_h, width, height,
+		win->last_client_conf_w, win->last_client_conf_h);
 	wlr_xdg_toplevel_set_size(win->toplevel, width, height);
 	if (width > 0 && height > 0) {
 		win->last_client_conf_w = width;
@@ -599,17 +602,19 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 		return;
 	}
 	if (win->output->width == w && win->output->height == h) {
+		wlr_log(WLR_DEBUG, "size: resize_output_to %dx%d (already)", w, h);
 		return;
 	}
+	wlr_log(WLR_INFO, "size: resize_output_to %dx%d → %dx%d (size_from_wm=%d)",
+		win->output->width, win->output->height, w, h,
+		(int)win->size_from_wm);
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, w, h, 0);
 	if (!wlr_output_commit_state(win->output, &state)) {
-		wlr_log(WLR_ERROR, "failed to resize X11 output to %dx%d", w, h);
+		wlr_log(WLR_ERROR, "size: resize_output_to %dx%d FAILED", w, h);
 	}
 	wlr_output_state_finish(&state);
-	/* output_commit may have already updated last_*, set_size, and
-	 * WM_NORMAL_HINTS; keep last_* consistent if commit did not emit. */
 	win->last_output_width = win->output->width;
 	win->last_output_height = win->output->height;
 	win_sync_size_hints(win);

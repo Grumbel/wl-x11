@@ -195,18 +195,18 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			 out_h > win->output->height + 1);
 		bool fit = size_mismatch &&
 			(!win->size_from_wm || client_driven);
-		if (size_mismatch || conf_differs) {
-			wlr_log(WLR_INFO,
-				"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
-				"output=%dx%d size_from_wm=%d tiled=%d "
-				"mismatch=%d conf_diff=%d client_driven=%d fit=%d grow=%d",
-				cw, ch, conf_w, conf_h,
-				win->last_client_conf_w, win->last_client_conf_h,
-				win->output->width, win->output->height,
-				(int)win->size_from_wm, (int)tiled,
-				(int)size_mismatch, (int)conf_differs,
-				(int)client_driven, (int)fit, (int)grow);
-		}
+		wlr_log(WLR_INFO,
+			"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
+			"output=%dx%d size_from_wm=%d tiled=%d "
+			"mismatch=%d conf_diff=%d client_driven=%d fit=%d grow=%d "
+			"csd_margin=%dx%d",
+			cw, ch, conf_w, conf_h,
+			win->last_client_conf_w, win->last_client_conf_h,
+			win->output->width, win->output->height,
+			(int)win->size_from_wm, (int)tiled,
+			(int)size_mismatch, (int)conf_differs,
+			(int)client_driven, (int)fit, (int)grow,
+			win->csd_margin_w, win->csd_margin_h);
 		if (client_driven) {
 			win->size_from_wm = false;
 		}

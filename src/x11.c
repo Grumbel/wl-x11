@@ -515,32 +515,46 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	struct wlx_window *win = wl_container_of(listener, win, output_request_state);
 	const struct wlr_output_event_request_state *event = data;
 
-	wlr_log(WLR_INFO, "size: host request_state (current output %dx%d) "
-		"size_from_wm=1",
-		win->output ? win->output->width : 0,
-		win->output ? win->output->height : 0);
+	int req_w = 0, req_h = 0;
+	bool have_mode = false;
+	if (event && event->state &&
+			(event->state->committed & WLR_OUTPUT_STATE_MODE)) {
+		have_mode = true;
+		if (event->state->mode) {
+			req_w = event->state->mode->width;
+			req_h = event->state->mode->height;
+		} else {
+			req_w = event->state->custom_mode.width;
+			req_h = event->state->custom_mode.height;
+		}
+	}
+
+	int cur_w = win->output ? win->output->width : 0;
+	int cur_h = win->output ? win->output->height : 0;
+
+	wlr_log(WLR_INFO,
+		"size: request_state cur=%dx%d req=%dx%d have_mode=%d "
+		"size_from_wm=%d→1 last_conf=%dx%d committed=0x%x",
+		cur_w, cur_h, req_w, req_h, (int)have_mode,
+		(int)win->size_from_wm,
+		win->last_client_conf_w, win->last_client_conf_h,
+		event && event->state ? event->state->committed : 0);
+
 	/* Host WM or user resized the X11 window — stop auto-fitting to
 	 * client geometry on subsequent commits. */
 	win->size_from_wm = true;
 	/* Sync maximized/fullscreen from X before applying the size so
 	 * output_commit does not subtract CSD margins on a maximize resize. */
 	win_handle_net_wm_state_notify(win->server, win);
-	/* output_commit() fires synchronously as part of this call and
-	 * handles diffing the new size against what we last told the
-	 * toplevel and forwarding it if different. Schedule a frame so the
-	 * next painted buffer lands ASAP (reduces empty-window flash after
-	 * the swapchain is recreated at the new size). */
 	wlr_output_commit_state(win->output, event->state);
+	wlr_log(WLR_INFO, "size: request_state after commit output=%dx%d",
+		win->output ? win->output->width : 0,
+		win->output ? win->output->height : 0);
 	if (win->output) {
 		wlr_output_schedule_frame(win->output);
 	}
 }
 
-/* Drive both the xdg_toplevel ACTIVATED state (which is what clients like
- * weston-terminal read to decide e.g. solid vs. hollow cursor block) and
- * wl_seat keyboard focus from the host WM's real X11 focus, rather than
- * from our own pointer-hover heuristics. This keeps "this window is
- * focused" meaning the same thing at the X11 level and the Wayland level. */
 void set_active_window(struct wlx_server *server, struct wlx_window *win) {
 	if (server->focused_window == win) {
 		return;
