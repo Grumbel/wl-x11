@@ -13,23 +13,31 @@ the X11 backend freely.
 
 ## Size negotiation (client ↔ host WM)
 
-Observed loop: `resize_output_to(A)` then `request_state` applies previous
-size B → `set_size(B)` → client still prefers A → repeat.
+Log pattern of the loop:
 
-Stale-configure *filters* (ignore prev / insist counters) were tried and
-**removed** — too sticky, blocked real resizes.
+```
+resize_output_to 562x697 → 557x345
+output_commit 557x345 / set_size 557x345
+request_state cur=557x345 req=562x697   ← previous size
+output_commit 562x697 / set_size 562x697
+commit preferred=557x345 → fit again …
+```
 
-Diagnostics only for now (`size:` at INFO):
+Cause: X11 `ConfigureNotify` can arrive **out of order**. The backend used to
+always `request_state` on every notify, so a stale event restored the old size.
 
-- `size: commit …` — preferred/conf/last_conf/output + decision flags
-- `size: resize_output_to …` — compositor initiating host resize
-- `size: request_state cur=… req=…` — backend-detected X configure
-- `size: request_state after commit output=…`
-- `size: output_commit …` / `size: set_size …`
+Compositor-side “ignore prev size” filters were tried and removed (too sticky).
 
-- [ ] Capture a full sequence and fix the root cause without ignoring
-      configures (likely: do not `set_size` from `output_commit` when the
-      resize was compositor-initiated, or coalesce configure serials)
+Proper fix (vendored wlroots `backend/x11/output.c`):
+
+- [x] Record sequence of our `ConfigureWindow` in `output_set_custom_mode`
+- [x] In `handle_x11_configure_notify`, drop events with `sequence` older than
+      that configure (stale)
+- [x] Drop notifies that already match `win_width/height` (echo — no
+      `request_state`)
+- [x] Only then emit `request_state` (real WM/user resize)
+- [ ] Rebuild with vendored wlroots and confirm `x11: ignore stale
+      ConfigureNotify` appears instead of the loop
 
 
 ## Explicitly out of scope (for now)

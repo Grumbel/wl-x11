@@ -69,17 +69,14 @@ static bool output_set_custom_mode(struct wlr_output *wlr_output,
 	}
 
 	const uint32_t values[] = { width, height };
-	xcb_void_cookie_t cookie = xcb_configure_window_checked(
+	/* Unchecked cookie so we can record the sequence; errors are rare and
+	 * still visible via later geometry/configure. */
+	xcb_void_cookie_t cookie = xcb_configure_window(
 		x11->xcb, output->win,
 		XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
-
-	xcb_generic_error_t *error;
-	if ((error = xcb_request_check(x11->xcb, cookie))) {
-		wlr_log(WLR_ERROR, "Could not set window size to %dx%d\n",
-			width, height);
-		free(error);
-		return false;
-	}
+	output->last_configure_seq = cookie.sequence;
+	output->has_configure_seq = true;
+	xcb_flush(x11->xcb);
 
 	output->win_width = width;
 	output->win_height = height;
@@ -756,6 +753,31 @@ void handle_x11_configure_notify(struct wlr_x11_output *output,
 			ev->width, ev->height);
 		return;
 	}
+
+	/* Sequence is that of the last server-processed request when the event
+	 * was generated. Events older than our last ConfigureWindow are stale
+	 * (out-of-order) and must not undo a compositor-initiated resize. */
+	if (output->has_configure_seq) {
+		int16_t delta = (int16_t)(ev->sequence - output->last_configure_seq);
+		if (delta < 0) {
+			wlr_log(WLR_INFO, "x11: ignore stale ConfigureNotify %dx%d "
+				"(seq=%u < last_configure_seq=%u)",
+				ev->width, ev->height,
+				ev->sequence, output->last_configure_seq);
+			return;
+		}
+	}
+
+	/* Echo of our own ConfigureWindow: size already applied in
+	 * output_set_custom_mode / commit — do not re-enter request_state. */
+	if (ev->width == output->win_width && ev->height == output->win_height) {
+		wlr_log(WLR_DEBUG, "x11: ConfigureNotify %dx%d matches win size "
+			"(echo, no request_state)", ev->width, ev->height);
+		return;
+	}
+
+	wlr_log(WLR_INFO, "x11: ConfigureNotify %dx%d (was %dx%d) → request_state",
+		ev->width, ev->height, output->win_width, output->win_height);
 
 	output->win_width = ev->width;
 	output->win_height = ev->height;

@@ -36,6 +36,11 @@ struct wlr_x11_output {
 	xcb_present_event_t present_event_id;
 
 	int32_t win_width, win_height;
+	/* Sequence of last ConfigureWindow we issued; ConfigureNotify
+	 * events with an older sequence are stale (out-of-order) and must
+	 * not undo that resize via request_state. */
+	uint16_t last_configure_seq;
+	bool has_configure_seq;
 
 	struct wlr_pointer pointer;
 
