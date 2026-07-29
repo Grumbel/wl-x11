@@ -305,8 +305,8 @@ before switching the compositor path so we can A/B.
 - [x] Frame scheduling: present on map/commit via `popup_render_and_present`
       (direct client buffer when scale=1; else render-pass composite);
       `xpresent_frame` sends `frame_done` to popup surfaces
-- [ ] Unconstrain box: prefer host monitor work area in root space when
-      available; keep large fallback (still large fixed box)
+- [x] Unconstrain box: prefer host `_NET_WORKAREA` / root size in parent
+      surface coords (nested popups use parent popup root box); large fallback
 
 #### Phase 4 — Input
 
@@ -473,3 +473,8 @@ Reuse `wlr_x11_present_window_*` and the same Present / format fallback as
 - 2026-07-29: Phase S1–S2 landed (`src/subpresent.c`): overflow subsurfaces
   get OR present-windows; scene node disabled; root hit-test wired.
   Awaiting manual gedit menubar verify.
+
+- 2026-07-29: xdg_popup unconstrain uses host `_NET_WORKAREA` (else X root)
+  converted into parent-surface coordinates; nested menus use parent popup
+  root box. Remaining open: manual verify (gedit menubar subpresent, GTK/Qt
+  xdg_popup), present-window unit smoke under DISPLAY.

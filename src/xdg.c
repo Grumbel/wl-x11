@@ -1118,6 +1118,128 @@ static void popup_unmap(struct wl_listener *listener, void *data) {
 	wlx_pointer_refresh_focus(pop->server);
 }
 
+
+/* Unconstrain box in parent-surface coordinates: prefer the host X root
+ * (full desktop) so menus are not squeezed into the parent toplevel.
+ * Falls back to a large fixed box if geometry is unavailable. */
+static void popup_unconstrain_box(struct wlx_popup *pop, struct wlr_box *box) {
+	box->x = -2000;
+	box->y = -2000;
+	box->width = 8000;
+	box->height = 8000;
+
+	struct wlx_server *server = pop->server;
+	if (!server || !server->xcb) {
+		return;
+	}
+
+	const xcb_setup_t *setup = xcb_get_setup(server->xcb);
+	if (!setup) {
+		return;
+	}
+	xcb_screen_t *screen = xcb_setup_roots_iterator(setup).data;
+	if (!screen) {
+		return;
+	}
+
+	int root_w = (int)screen->width_in_pixels;
+	int root_h = (int)screen->height_in_pixels;
+	if (root_w < 1 || root_h < 1) {
+		return;
+	}
+
+	/* Optional EWMH workarea (x, y, width, height CARDINALs). */
+	int wa_x = 0, wa_y = 0, wa_w = root_w, wa_h = root_h;
+	xcb_atom_t atom_workarea = intern_atom(server->xcb, "_NET_WORKAREA");
+	if (atom_workarea != XCB_ATOM_NONE) {
+		xcb_get_property_cookie_t cookie = xcb_get_property(
+			server->xcb, 0, server->xcb_root, atom_workarea,
+			XCB_ATOM_CARDINAL, 0, 4);
+		xcb_get_property_reply_t *reply =
+			xcb_get_property_reply(server->xcb, cookie, NULL);
+		if (reply && reply->type == XCB_ATOM_CARDINAL &&
+				reply->format == 32 &&
+				xcb_get_property_value_length(reply) >= 16) {
+			uint32_t *v = xcb_get_property_value(reply);
+			wa_x = (int)v[0];
+			wa_y = (int)v[1];
+			wa_w = (int)v[2];
+			wa_h = (int)v[3];
+			if (wa_w < 1) {
+				wa_w = root_w;
+			}
+			if (wa_h < 1) {
+				wa_h = root_h;
+			}
+		}
+		free(reply);
+	}
+
+	/* Parent origin in root pixels → box origin in *xdg parent surface*
+	 * logical coords (toplevel or parent popup). */
+	int16_t parent_rx = 0, parent_ry = 0;
+	bool have_parent = false;
+	bool parent_is_popup = false;
+	struct wlr_surface *psurf = pop->xdg_popup ? pop->xdg_popup->parent : NULL;
+	struct wlr_xdg_surface *pxdg = psurf
+		? wlr_xdg_surface_try_from_wlr_surface(psurf) : NULL;
+	if (pxdg && pxdg->role == WLR_XDG_SURFACE_ROLE_POPUP && pxdg->data) {
+		struct wlx_popup *pp = pxdg->data;
+		if (!pp->root_box_valid) {
+			popup_update_root_box(pp);
+		}
+		if (pp->root_box_valid) {
+			parent_rx = pp->root_x;
+			parent_ry = pp->root_y;
+			have_parent = true;
+			parent_is_popup = true;
+		}
+	}
+	if (!have_parent && pop->parent) {
+		have_parent = window_content_root_position(pop->parent,
+			&parent_rx, &parent_ry);
+	}
+	if (!have_parent) {
+		box->x = 0;
+		box->y = 0;
+		box->width = wlx_unscale_size(server, wa_w);
+		box->height = wlx_unscale_size(server, wa_h);
+		if (box->width < 1) {
+			box->width = 1;
+		}
+		if (box->height < 1) {
+			box->height = 1;
+		}
+		return;
+	}
+
+	int lx = wlx_unscale_size(server, wa_x - (int)parent_rx);
+	int ly = wlx_unscale_size(server, wa_y - (int)parent_ry);
+	int lw = wlx_unscale_size(server, wa_w);
+	int lh = wlx_unscale_size(server, wa_h);
+
+	/* SSD toplevel: content window origin is geometry origin. */
+	if (!parent_is_popup && !server->prefer_csd && pop->parent &&
+			pop->parent->toplevel) {
+		struct wlr_box geo = pop->parent->toplevel->base->current.geometry;
+		if (geo.width > 0 && geo.height > 0) {
+			lx += geo.x;
+			ly += geo.y;
+		}
+	}
+
+	if (lw < 1) {
+		lw = 1;
+	}
+	if (lh < 1) {
+		lh = 1;
+	}
+	box->x = lx;
+	box->y = ly;
+	box->width = lw;
+	box->height = lh;
+}
+
 static void popup_commit(struct wl_listener *listener, void *data) {
 	struct wlx_popup *pop = wl_container_of(listener, pop, commit);
 	(void)data;
@@ -1128,12 +1250,10 @@ static void popup_commit(struct wl_listener *listener, void *data) {
 	 * unconstrain in new_popup / setup_popup trips
 	 * assert(surface->initialized) inside schedule_configure. */
 	if (pop->xdg_popup->base->initial_commit) {
-		struct wlr_box box = {
-			.x = -2000,
-			.y = -2000,
-			.width = 8000,
-			.height = 8000,
-		};
+		struct wlr_box box;
+		popup_unconstrain_box(pop, &box);
+		wlr_log(WLR_DEBUG, "xdg_popup unconstrain box (%d,%d) %dx%d",
+			box.x, box.y, box.width, box.height);
 		wlr_xdg_popup_unconstrain_from_box(pop->xdg_popup, &box);
 	}
 
