@@ -353,12 +353,14 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 		 * host resize does not subtract the old margin from the configure. */
 		if (maximized) {
 			win->size_from_wm = true;
+			win->client_size_insist = 0;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
 		} else {
 			/* Allow surface_commit to grow the host for restored CSD
 			 * shadows (otherwise buffer is clipped at right/bottom). */
 			win->size_from_wm = false;
+			win->client_size_insist = 0;
 		}
 		wlr_xdg_toplevel_set_maximized(win->toplevel, maximized);
 	}
@@ -367,10 +369,12 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 			fullscreen);
 		if (fullscreen) {
 			win->size_from_wm = true;
+			win->client_size_insist = 0;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
 		} else {
 			win->size_from_wm = false;
+			win->client_size_insist = 0;
 		}
 		wlr_xdg_toplevel_set_fullscreen(win->toplevel, fullscreen);
 	}
@@ -520,6 +524,7 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	/* Host WM or user resized the X11 window — stop auto-fitting to
 	 * client geometry on subsequent commits. */
 	win->size_from_wm = true;
+	win->client_size_insist = 0;
 	/* Sync maximized/fullscreen from X before applying the size so
 	 * output_commit does not subtract CSD margins on a maximize resize. */
 	win_handle_net_wm_state_notify(win->server, win);

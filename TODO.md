@@ -11,6 +11,24 @@ the X11 backend freely.
 
 ## Medium impact
 
+## Size negotiation (client ↔ host WM)
+
+Rare feedback loop: client commits preferred size A while host WM keeps
+size B → `surface_commit` fits to A (`client_driven`) → WM Configure back
+to B (`output_request_state` / `size_from_wm`) → client commits A again.
+
+Mitigations (2026-07-29):
+
+- [x] 1px hysteresis on host vs preferred and on configure vs last
+- [x] While `size_from_wm`, require **3 consecutive** committing mismatches
+      (`client_size_insist`) before adopting client size and clearing the flag
+- [x] Reset insist counter on host `request_state` / maximize / fullscreen
+- [x] Avoid redundant `set_size` after `resize_output_to` when configure
+      already matches
+- [ ] Manual verify: Qt apps that used to oscillate; intentional client
+      resize still applies within a few commits
+
+
 ### Clipboard / DnD scope
 
 Bridge is still a **single text blob** on CLIPBOARD and PRIMARY (not binary
