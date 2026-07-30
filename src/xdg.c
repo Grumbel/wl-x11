@@ -178,43 +178,26 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			dh = -dh;
 		}
 		bool size_mismatch = dw > 1 || dh > 1;
-		int conf_dw = conf_w - win->last_client_conf_w;
-		int conf_dh = conf_h - win->last_client_conf_h;
-		if (conf_dw < 0) {
-			conf_dw = -conf_dw;
-		}
-		if (conf_dh < 0) {
-			conf_dh = -conf_dh;
-		}
-		bool conf_differs = win->last_client_conf_w <= 0 ||
-			win->last_client_conf_h <= 0 ||
-			conf_dw > 1 || conf_dh > 1;
-		/* Client asserts a new geometry (not merely acking last_conf): allow
-		 * fit even after a prior size_from_wm. Self-configure ack is handled
-		 * in the X11 backend (pending size); request_state is host-driven. */
-		bool client_assert = size_mismatch && conf_differs;
-		if (client_assert) {
-			win->size_from_wm = false;
-		}
-		bool fit = size_mismatch && !win->size_from_wm;
+		/* Grow-only client fit: never shrink the host from preferred size.
+		 * Client buffer oscillation (e.g. 557 ↔ 2560 during maximize races)
+		 * previously flipped fit both ways and fought the X window forever.
+		 * Shrinking is host-driven only (size_from_wm via request_state).
+		 * Initial map still grows from the 1×1 placeholder. */
 		bool grow = !tiled && !win->size_from_wm &&
 			(out_w > win->output->width + 1 ||
 			 out_h > win->output->height + 1);
 		wlr_log(WLR_INFO,
 			"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
 			"output=%dx%d size_from_wm=%d tiled=%d "
-			"mismatch=%d conf_diff=%d client_assert=%d fit=%d grow=%d "
-			"csd_margin=%dx%d",
+			"mismatch=%d grow=%d csd_margin=%dx%d",
 			cw, ch, conf_w, conf_h,
 			win->last_client_conf_w, win->last_client_conf_h,
 			win->output->width, win->output->height,
 			(int)win->size_from_wm, (int)tiled,
-			(int)size_mismatch, (int)conf_differs,
-			(int)client_assert, (int)fit, (int)grow,
+			(int)size_mismatch, (int)grow,
 			win->csd_margin_w, win->csd_margin_h);
-		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE &&
-				(fit || grow) && !tiled) {
-			wlr_log(WLR_INFO, "size: fit host output → %dx%d "
+		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE && grow) {
+			wlr_log(WLR_INFO, "size: grow host output → %dx%d "
 				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
 				out_w, out_h, conf_w, conf_h,
 				win->csd_margin_w, win->csd_margin_h,
@@ -231,6 +214,10 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		} else if (size_mismatch && win->size_from_wm) {
 			wlr_log(WLR_INFO, "size: hold host size (size_from_wm=1, "
 				"preferred %dx%d vs output %dx%d)",
+				cw, ch, win->output->width, win->output->height);
+		} else if (size_mismatch && !grow) {
+			wlr_log(WLR_DEBUG, "size: ignore shrink preferred %dx%d "
+				"(host stays %dx%d; shrink is host-driven only)",
 				cw, ch, win->output->width, win->output->height);
 		}
 	}

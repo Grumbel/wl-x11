@@ -36,9 +36,14 @@ notify). Compositor keeps only policy (`size_from_wm` vs preferred size).
 - [x] Compositor: drop `awaiting_configure_*` soft-ignore / re-assert loop;
       `request_state` that reaches us is treated as host geometry →
       `size_from_wm` + commit.
+- [x] Compositor: **grow-only** preferred fit. Client buffer oscillation
+      (557 ↔ 2560 with `size_from_wm=0`) used to shrink and grow the host
+      every commit (`fit` + `client_assert` cleared policy). Shrinking the
+      X window is host-driven only (`request_state` / `size_from_wm`).
 - [ ] Manual verify: one bounce max then hold; interactive WM resize still
-      updates client via set_size; initial map (size_from_wm=0) still fits;
-      maximize/tile while a client fit is in flight accepts host size.
+      updates client via set_size; initial map (size_from_wm=0) still grows
+      from placeholder; maximize/tile accepts host size; client preferred
+      shrink does not fight the host window.
 
 
 ## Explicitly out of scope (for now)
