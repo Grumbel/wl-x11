@@ -209,7 +209,21 @@ and current geometry already match that size (±1px).
 
 ---
 
-## 7. Manual verification checklist
+## 7. Automated client: `tools/resize-torture`
+
+Raw xdg-shell stress client (flake output `.#resize-torture`) cycles:
+
+map → grow → shrink → oscillate → undersize → follow →
+maximize → undersize_while_max → unmaximize → done
+
+```bash
+nix run .#resize-torture -- --loop
+# under wl-x11: compare stderr with compositor size: lines
+```
+
+See `tools/resize-torture/README.md`.
+
+## 8. Manual verification checklist
 
 - [ ] Initial map grows from 1×1 to client preferred once.
 - [ ] Content-driven shrink/grow moves the X window when floating.
@@ -221,7 +235,7 @@ and current geometry already match that size (±1px).
 
 ---
 
-## 8. Changelog (design)
+## 9. Changelog (design)
 
 | Date | Change |
 |------|--------|

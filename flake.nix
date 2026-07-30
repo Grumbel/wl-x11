@@ -112,16 +112,47 @@
             mainProgram = "wl-x11";
           };
         };
+        resize-torture = pkgs.stdenv.mkDerivation {
+          pname = "wl-x11-resize-torture";
+          inherit version;
+          src = lib.cleanSourceWith {
+            src = ./tools/resize-torture;
+            filter = path: type:
+              let base = baseNameOf path; in
+              base != ".git" && base != "build" && base != "result";
+          };
+          nativeBuildInputs = with pkgs; [
+            meson
+            ninja
+            pkg-config
+            wayland-scanner
+          ];
+          buildInputs = with pkgs; [
+            wayland
+            wayland-protocols
+          ];
+          meta = with lib; {
+            description = "xdg-shell resize stress client for wl-x11";
+            license = licenses.gpl3Plus;
+            platforms = platforms.linux;
+            mainProgram = "resize-torture";
+          };
+        };
       in
       {
         packages = {
           default = wl-x11;
-          inherit wl-x11 wlroots;
+          inherit wl-x11 wlroots resize-torture;
         };
 
         apps.default = {
           type = "app";
           program = "${wl-x11}/bin/wl-x11";
+        };
+
+        apps.resize-torture = {
+          type = "app";
+          program = "${resize-torture}/bin/resize-torture";
         };
 
         checks.reuse = pkgs.runCommand "wl-x11-reuse-lint" {
@@ -152,6 +183,7 @@
             echo "wl-x11 dev shell."
             echo "  packages.wlroots = patched X11-only wlroots (cached separately)"
             echo "  packages.wl-x11   = compositor only"
+            echo "  packages.resize-torture = xdg-shell resize stress client"
             echo "Build compositor against the Nix wlroots package:"
             echo "  meson setup build -Duse_system_wlroots=true && ninja -C build"
             echo "Or use the in-tree subproject (no flag) if present:"
