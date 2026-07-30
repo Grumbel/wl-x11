@@ -11,3 +11,12 @@ option(
   value: false,
   description: 'Link against pkg-config wlroots instead of the vendored patched subproject (not recommended)',
 )
+
+# Packaging (e.g. Nix flake) may set this to VERSION + "+g" + short git rev.
+# Empty means use the contents of the top-level VERSION file as-is.
+option(
+  'version_full',
+  type: 'string',
+  value: '',
+  description: 'Override full version string for WLX_VERSION (default: VERSION file)',
+)

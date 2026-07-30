@@ -14,6 +14,12 @@
         pkgs = import nixpkgs { inherit system; };
         inherit (pkgs) lib;
 
+        # Source of truth: top-level VERSION (e.g. "0.1.0-dev"). Append short
+        # git rev when building from a flake checkout; see AGENTS.md.
+        versionBase = lib.strings.removeSuffix "\n" (builtins.readFile ./VERSION);
+        gitRev = "${self.shortRev or self.dirtyShortRev or "dirty"}";
+        version = "${versionBase}+g${gitRev}";
+
         # Shared deps for building our patched wlroots (X11 backend only).
         wlrootsBuildInputs = with pkgs; [
           wayland
@@ -79,7 +85,7 @@
 
         wl-x11 = pkgs.stdenv.mkDerivation {
           pname = "wl-x11";
-          version = "0.1.0";
+          inherit version;
           src = wlX11Src;
 
           nativeBuildInputs = with pkgs; [
@@ -92,8 +98,10 @@
 
           # Source is filtered without subprojects/; meson falls back to the
           # patched packages.wlroots via pkg-config (see meson.build).
+          # version_full embeds VERSION+g<rev> into the binary (--version).
           mesonFlags = [
             "-Duse_system_wlroots=true"
+            "-Dversion_full=${version}"
           ];
 
           meta = with lib; {

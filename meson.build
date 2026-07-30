@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Ingo Ruhnke <grumbel@gmail.com>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Source of truth for the version string is the top-level VERSION file
+# (e.g. "0.1.0-dev"). Packaging (Nix flake) may pass -Dversion_full=... to
+# append +g<rev>; see AGENTS.md "Version Number Handling".
 project(
   'wl-x11',
   'c',
-  version: '0.1.0',
+  version: run_command('cat', 'VERSION', check: true).stdout().strip(),
   default_options: [
     'c_std=gnu11',
     'warning_level=2',
@@ -18,6 +21,16 @@ project(
 add_project_arguments('-Wno-unused-parameter', language: 'c')
 
 add_project_arguments('-DWLR_USE_UNSTABLE', language: 'c')
+
+# Full version string exposed to the binary as WLX_VERSION (for --version).
+version_full = get_option('version_full')
+if version_full == ''
+  version_full = meson.project_version()
+endif
+add_project_arguments(
+  '-DWLX_VERSION="@0@"'.format(version_full),
+  language: 'c',
+)
 
 wayland_server = dependency('wayland-server')
 xkbcommon = dependency('xkbcommon')

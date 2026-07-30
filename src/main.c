@@ -125,9 +125,13 @@ int main(int argc, char **argv) {
 				fprintf(stderr, "wl-x11: invalid --scale value '%s'\n", argv[i] + 8);
 				return 1;
 			}
+		} else if (strcmp(argv[i], "--version") == 0 ||
+				strcmp(argv[i], "-V") == 0) {
+			printf("wl-x11 %s\n", WLX_VERSION);
+			return 0;
 		} else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
 			printf("usage: wl-x11 [--debug] [--ssd|--csd] [--scale FACTOR] "
-				"[command [args...]]\n"
+				"[--version] [command [args...]]\n"
 				"  --debug             print verbose diagnostic logging "
 				"(default: only errors)\n"
 				"  --ssd               server-side decorations via the host "
@@ -139,6 +143,7 @@ int main(int argc, char **argv) {
 				"                      Wayland clients draw their own chrome\n"
 				"  --scale FACTOR      brute-force scale all content pixels "
 				"(e.g. 2, 0.5; default 1)\n"
+				"  --version, -V       print version and exit\n"
 				"  command [args...]   also launch this program with "
 				"WAYLAND_DISPLAY set,\n"
 				"                      and shut down once no Wayland "

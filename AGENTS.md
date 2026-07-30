@@ -170,3 +170,60 @@ See [TODO.md](TODO.md) for history and remaining integration checks.
 - Never call `wlr_seat_pointer_notify_enter` while a button is held if it
   would change the focused surface — that resets seat buttons mid-click.
 - Update [TODO.md](TODO.md) when finishing or retiring an item.
+
+
+## Version Number Handling
+
+* Version number is stored in a file `VERSION` in the top-level directory and
+  it is the **only** source of truth. The version number shall not be
+  duplicated in other places; it must be generated dynamically from that file.
+* Inside git, the version number always contains a `-dev` suffix
+  (e.g. `0.1.0-dev`).
+* **Meson (this project):** `meson.build` reads `VERSION` via
+  `run_command('cat', 'VERSION', …)` for `project(version: …)`. The string
+  exposed to C is `WLX_VERSION`, taken from meson option `version_full` when
+  set (packaging), otherwise from `meson.project_version()`.
+* **CMake projects (general rule):** inside `CMakeLists.txt` the VERSION file
+  is read and made available as `PROJECT_VERSION_FULL`. CMake passes
+  `PROJECT_VERSION_FULL` on to the source code as `{projectname}_VERSION`,
+  e.g. `JSTEST_VERSION`.
+* `flake.nix` reads the `VERSION` file and uses it as the version number, but
+  appends the short git hash as a suffix when available, e.g.
+  `0.1.0-dev+gd910b1c` or `0.1.0-dev+gfb40b2c-dirty`.
+* The version number shall be made available via a `--version` command-line
+  flag (and in About dialogs for GUI applications).
+* When a release is prepared, the `-dev` suffix is removed, the VERSION file
+  is committed, and the tag is created: e.g. `0.1.0-dev` becomes `0.1.0` and
+  the tree is tagged `v0.1.0`. The tag always matches the VERSION file with an
+  additional `v` prefix.
+
+### flake.nix pattern
+
+```nix
+versionBase = lib.strings.removeSuffix "\n" (builtins.readFile ./VERSION);
+gitRev = "${self.shortRev or self.dirtyShortRev or "dirty"}";
+version = "${versionBase}+g${gitRev}";
+```
+
+### CMakeLists.txt pattern (for CMake-based projects)
+
+```cmake
+# Source of truth: top-level VERSION file (e.g. "0.2.0-dev"), or
+# -DPROJECT_VERSION_FULL=... from the packaging (Nix flake appends +g<rev>).
+if(NOT DEFINED PROJECT_VERSION_FULL)
+  file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" PROJECT_VERSION_FULL LIMIT_COUNT 1)
+endif()
+```
+
+### Meson pattern (this project)
+
+```meson
+project('wl-x11', 'c',
+  version: run_command('cat', 'VERSION', check: true).stdout().strip(),
+  …)
+version_full = get_option('version_full')
+if version_full == ''
+  version_full = meson.project_version()
+endif
+add_project_arguments('-DWLX_VERSION="@0@"'.format(version_full), language: 'c')
+```
