@@ -44,9 +44,9 @@ notify). Compositor keeps only policy (`size_from_wm` vs preferred size).
       shrink/grow works while rapid maximize races do not.
 - [x] Host authority path calls `wlx_toplevel_fill_host` so a small client
       buffer cannot stay letterboxed in a large host (maximize / focus loss).
-- [ ] Manual verify: map grow; content shrink/grow floating; interactive WM
-      resize; maximize fills; focus-loss while max; unmaximize restores
-      preferred-fit; no rapid thrash (see docs/SIZE.md §7).
+- [x] Manual verify via `tools/resize-torture` (map/grow/shrink/oscillate/
+      restable/maximize/undersize_while_max/unmaximize → stable ~500×350).
+      Still worth a pass on real GTK/Qt apps for interactive WM chrome.
 
 
 ## Explicitly out of scope (for now)
