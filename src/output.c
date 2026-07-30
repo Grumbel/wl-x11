@@ -620,6 +620,15 @@ void resize_output_to(struct wlx_window *win, int w, int h) {
 		wlr_log(WLR_ERROR, "size: resize_output_to %dx%d FAILED", w, h);
 		win->awaiting_configure_w = 0;
 		win->awaiting_configure_h = 0;
+	} else if (win->output->width == w && win->output->height == h) {
+		/* Mode applied synchronously; backend may never emit a confirming
+		 * ConfigureNotify (or filters it as echo). Drop awaiting so a later
+		 * host maximize is not ignored. */
+		wlr_log(WLR_INFO, "size: resize_output_to %dx%d applied sync, "
+			"clear awaiting", w, h);
+		win->awaiting_configure_w = 0;
+		win->awaiting_configure_h = 0;
+		win->awaiting_configure_ignores = 0;
 	}
 	wlr_output_state_finish(&state);
 	win->last_output_width = win->output->width;
