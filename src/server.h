@@ -314,6 +314,12 @@ struct wlx_window {
 	 * distinguish client-driven resizes from "client acked our configure". */
 	int last_client_conf_w;
 	int last_client_conf_h;
+	/* Preferred-driven host fits (when !size_from_wm). Used to block
+	 * A→B→A oscillation within WLX_FIT_OSCILLATION_MS (maximize fights)
+	 * while still allowing slower content-driven shrink/grow. */
+	int fit_last_w, fit_last_h;
+	int fit_prev_w, fit_prev_h;
+	int64_t fit_last_msec;
 	/* Skip scene Present after an output size change until the client
 	 * commits a new buffer, so the previous frame stays on screen. */
 	bool hold_present;
