@@ -357,8 +357,8 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 	}
 
-	/* Re-apply pixel scale after the scene helper refreshed buffer dest sizes. */
-	wlx_apply_content_scale(win);
+	/* Scene just refreshed logical dest/positions; scale both once. */
+	wlx_apply_content_scale_ex(win, true);
 
 	/* xdg min/max may have changed on this commit — keep host hints current. */
 	if (win->xwin != XCB_WINDOW_NONE && win->output) {
@@ -1130,15 +1130,15 @@ static void popup_position_and_map(struct wlx_popup *pop) {
 		popup_attach_xpresent_listeners(pop);
 	}
 
-	/* Prefer client buffer pixel size when available so Present matches. */
+	/* Buffer size is logical; present-window size is host pixels. */
 	struct wlr_surface *surf = pop->xdg_popup && pop->xdg_popup->base
 		? pop->xdg_popup->base->surface : NULL;
 	if (surf && surf->buffer) {
 		int bw = surf->buffer->base.width;
 		int bh = surf->buffer->base.height;
 		if (bw > 0 && bh > 0) {
-			width = bw;
-			height = bh;
+			width = wlx_scale_size(pop->server, bw);
+			height = wlx_scale_size(pop->server, bh);
 		}
 	}
 

@@ -105,7 +105,16 @@ static void scene_node_apply_scale(struct wlr_scene_node *node, double scale,
 	}
 }
 
+/* dest_only: refresh buffer dest sizes from surface logical * scale.
+ * When false, also multiply node positions by scale — only safe right after
+ * the scene has reset those positions to logical coords (surface commit).
+ * Calling position scaling every output_frame compounds scale and sends
+ * subsurfaces flying / collapsing (gedit menus under --scale). */
 void wlx_apply_content_scale(struct wlx_window *win) {
+	wlx_apply_content_scale_ex(win, false);
+}
+
+void wlx_apply_content_scale_ex(struct wlx_window *win, bool scale_positions) {
 	if (!win || !win->server || !win->scene_tree) {
 		return;
 	}
@@ -113,7 +122,8 @@ void wlx_apply_content_scale(struct wlx_window *win) {
 	if (scale <= 0.0 || scale == 1.0) {
 		return;
 	}
-	scene_node_apply_scale(&win->scene_tree->node, scale, win->server, true);
+	scene_node_apply_scale(&win->scene_tree->node, scale, win->server,
+		scale_positions);
 }
 
 void wlx_apply_popup_content_scale(struct wlx_popup *pop) {
@@ -124,8 +134,9 @@ void wlx_apply_popup_content_scale(struct wlx_popup *pop) {
 	if (scale <= 0.0 || scale == 1.0) {
 		return;
 	}
-	/* Position is set in output pixels by popup_position_and_map; only
-	 * enlarge buffers and internal subsurface offsets. */
+	/* Popup root is parked; children forced to (0,0) in position_and_map.
+	 * Only dest sizes matter; position multiply would still be harmful if
+	 * internal subsurface offsets were non-zero and applied twice. */
 	scene_node_apply_scale(&pop->scene_tree->node, scale, pop->server, true);
 }
 
@@ -936,7 +947,7 @@ void create_output_for_window(struct wlx_window *win) {
 	/* Do not lock the client to the first buffer size (0×0 = client picks).
 	 * Host still opens at preferred size; surface_commit grows it if needed. */
 	wlx_toplevel_set_size(win, 0, 0);
-	wlx_apply_content_scale(win);
+	wlx_apply_content_scale_ex(win, true);
 
 	/* First frame only after position/hints are applied. */
 	wlr_output_schedule_frame(output);

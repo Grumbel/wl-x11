@@ -29,7 +29,7 @@ bookkeeping only. On-screen placement is entirely the host WM’s job —
 see [AGENTS.md](AGENTS.md) (no fake `ConfigureWindow` for placement).
 
 Size negotiation (who owns the pixel size — client preferred vs host WM)
-is documented in **[docs/SIZE.md](docs/SIZE.md)**.
+is documented in **[docs/SIZE.md](docs/SIZE.md)**. Pixel scale (`--scale`) is documented in **[docs/SCALE.md](docs/SCALE.md)**.
 
 ## Quick start
 
