@@ -236,17 +236,19 @@ current `wlr_output` size.
 | Condition | Action |
 |-----------|--------|
 | `size_from_wm` and preferred ≠ output | **Hold host size** — do not `resize_output_to`; log `size: hold host size` |
-| Not tiled, not `size_from_wm`, preferred **larger** than output | **Grow** host: `resize_output_to` + `set_size` |
-| Preferred **smaller** than output, not host-driven | **Ignore shrink** — client oscillation must not shrink the X window |
+| Not tiled, not `size_from_wm`, preferred ≠ output | **Fit** host (grow or shrink): `resize_output_to` + `set_size` |
+| Same, but preferred returns to the previous fit within 400ms (A→B→A) | **Block oscillation** — host stays put (stops maximize races) |
 
-**Grow-only** is intentional. A previous “fit both directions” policy
-plus `client_assert` (clearing `size_from_wm` whenever geometry
-differed from `last_client_conf`) produced a tight loop when clients
-alternated buffers (e.g. 557×471 ↔ 2560×1391) and exhausted the
-swapchain.
+Preferred fit is **bidirectional** so content-driven apps can shrink
+and grow the host window. A previous unrestricted fit plus
+`client_assert` (clearing `size_from_wm` on every geometry change)
+produced a tight loop when clients alternated buffers rapidly
+(e.g. 557 ↔ 2560). The **oscillation guard** refuses A→B→A preferred
+fits within `WLX_FIT_OSCILLATION_MS` (400ms) so maximize races stop
+while slower content toggles still work.
 
 Initial map still works: the backend creates a **1×1 placeholder**
-mode; the first real preferred size is always a grow.
+mode; the first real preferred size is a fit from that placeholder.
 
 ### 3.4 Compositor: `resize_output_to` / `output_commit`
 
@@ -276,9 +278,11 @@ override.
 | ConfigureNotify matching our pending | Self-ack; no policy change | Already sized for that request |
 | ConfigureNotify other size | Host | `request_state` → commit → `set_size` |
 
-**Invariant:** once `size_from_wm` is set, client preferred size must not
-drive `resize_output_to` until host state restores otherwise (e.g.
-unmaximize clears the flag in the `_NET_WM_STATE` handler).
+**Invariant:** while `size_from_wm` is set, preferred size does not move
+the host **unless** the client asserts a geometry that differs from
+`last_client_conf` (content-driven resize). That clears `size_from_wm` and
+allows fit again. Unmaximize/fullscreen restore also clears the flag.
+Rapid A→B→A fits remain blocked by the oscillation guard.
 
 ---
 

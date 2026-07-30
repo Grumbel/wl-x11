@@ -51,6 +51,9 @@
 #define WLX_DEFAULT_WIDTH 1024
 #define WLX_DEFAULT_HEIGHT 720
 #define WLX_MIN_OUTPUT_SIZE 32
+/* Block preferred-driven A→B→A host fits closer than this (maximize fights).
+ * Content-driven resizes are typically slower. */
+#define WLX_FIT_OSCILLATION_MS 400
 #define WLX_MIN_WINDOW_SIZE 50
 #define WLX_DRAG_THROTTLE_MS 16
 

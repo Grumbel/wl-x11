@@ -178,30 +178,114 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			dh = -dh;
 		}
 		bool size_mismatch = dw > 1 || dh > 1;
-		/* Grow-only client fit: never shrink the host from preferred size.
-		 * Client buffer oscillation (e.g. 557 ↔ 2560 during maximize races)
-		 * previously flipped fit both ways and fought the X window forever.
-		 * Shrinking is host-driven only (size_from_wm via request_state).
-		 * Initial map still grows from the 1×1 placeholder. */
-		bool grow = !tiled && !win->size_from_wm &&
-			(out_w > win->output->width + 1 ||
-			 out_h > win->output->height + 1);
+		/* Client asserts a geometry we did not request (not merely acking
+		 * last_conf). That is intentional content-driven resize: release
+		 * size_from_wm so preferred fit can run. Host interactive resize
+		 * still wins until the client asserts; oscillation guard stops
+		 * rapid A→B→A after we follow. */
+		int conf_dw = conf_w - win->last_client_conf_w;
+		int conf_dh = conf_h - win->last_client_conf_h;
+		if (conf_dw < 0) {
+			conf_dw = -conf_dw;
+		}
+		if (conf_dh < 0) {
+			conf_dh = -conf_dh;
+		}
+		bool conf_differs = win->last_client_conf_w <= 0 ||
+			win->last_client_conf_h <= 0 ||
+			conf_dw > 1 || conf_dh > 1;
+		bool client_assert = size_mismatch && conf_differs && !tiled;
+		if (client_assert && win->size_from_wm) {
+			wlr_log(WLR_INFO, "size: client_assert %dx%d "
+				"(last_conf %dx%d) → clear size_from_wm",
+				conf_w, conf_h,
+				win->last_client_conf_w, win->last_client_conf_h);
+			win->size_from_wm = false;
+		}
+
+		/* Preferred-driven host fit when the host WM is not owning size.
+		 * Both grow and shrink: apps that resize for content (e.g. 845↔427)
+		 * must move the X window. Rapid A→B→A (maximize races) is blocked
+		 * by the oscillation guard below. */
+		bool want_fit = size_mismatch && !tiled && !win->size_from_wm &&
+			cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE;
+		bool growing = out_w > win->output->width + 1 ||
+			out_h > win->output->height + 1;
+		bool shrinking = out_w < win->output->width - 1 ||
+			out_h < win->output->height - 1;
+
+		struct timespec now_ts;
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+		int64_t now_msec = (int64_t)now_ts.tv_sec * 1000 +
+			now_ts.tv_nsec / 1000000;
+		int64_t since_fit = (win->fit_last_msec > 0) ?
+			(now_msec - win->fit_last_msec) : -1;
+
+		/* A→B→A within WLX_FIT_OSCILLATION_MS: refuse returning to A. */
+		bool oscillation = false;
+		if (want_fit && win->fit_last_w > 0 && win->fit_prev_w > 0 &&
+			since_fit >= 0 && since_fit < WLX_FIT_OSCILLATION_MS &&
+			out_w == win->fit_prev_w && out_h == win->fit_prev_h &&
+			(win->fit_last_w != win->fit_prev_w ||
+			 win->fit_last_h != win->fit_prev_h)) {
+			oscillation = true;
+		}
+
+		bool pending = wlr_output_is_x11(win->output) &&
+			wlr_x11_output_has_pending_configure(win->output);
+		int32_t pend_w = 0, pend_h = 0;
+		if (pending) {
+			wlr_x11_output_get_pending_size(win->output, &pend_w, &pend_h);
+		}
+
+		int buf_w = 0, buf_h = 0;
+		if (win->toplevel && win->toplevel->base &&
+				win->toplevel->base->surface) {
+			buf_w = win->toplevel->base->surface->current.width;
+			buf_h = win->toplevel->base->surface->current.height;
+		}
+
 		wlr_log(WLR_INFO,
 			"size: commit preferred=%dx%d conf=%dx%d last_conf=%dx%d "
-			"output=%dx%d size_from_wm=%d tiled=%d "
-			"mismatch=%d grow=%d csd_margin=%dx%d",
+			"output=%dx%d buf=%dx%d size_from_wm=%d tiled=%d "
+			"mismatch=%d conf_diff=%d client_assert=%d "
+			"grow=%d shrink=%d want_fit=%d osc=%d "
+			"since_fit_ms=%lld fit_last=%dx%d fit_prev=%dx%d "
+			"pending=%dx%d csd_margin=%dx%d",
 			cw, ch, conf_w, conf_h,
 			win->last_client_conf_w, win->last_client_conf_h,
 			win->output->width, win->output->height,
+			buf_w, buf_h,
 			(int)win->size_from_wm, (int)tiled,
-			(int)size_mismatch, (int)grow,
+			(int)size_mismatch, (int)conf_differs, (int)client_assert,
+			(int)growing, (int)shrinking,
+			(int)want_fit, (int)oscillation,
+			(long long)since_fit,
+			win->fit_last_w, win->fit_last_h,
+			win->fit_prev_w, win->fit_prev_h,
+			(int)pend_w, (int)pend_h,
 			win->csd_margin_w, win->csd_margin_h);
-		if (cw >= WLX_MIN_OUTPUT_SIZE && ch >= WLX_MIN_OUTPUT_SIZE && grow) {
-			wlr_log(WLR_INFO, "size: grow host output → %dx%d "
-				"(configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
-				out_w, out_h, conf_w, conf_h,
+
+		if (want_fit && oscillation) {
+			wlr_log(WLR_INFO, "size: block oscillation preferred %dx%d "
+				"(would return to fit_prev; last fit %dx%d %lldms ago; "
+				"host stays %dx%d)",
+				cw, ch, win->fit_last_w, win->fit_last_h,
+				(long long)since_fit,
+				win->output->width, win->output->height);
+		} else if (want_fit) {
+			wlr_log(WLR_INFO, "size: fit host output → %dx%d "
+				"(%s; configure %dx%d, margin %dx%d, scale %.2f, csd=%d)",
+				out_w, out_h,
+				growing ? "grow" : (shrinking ? "shrink" : "adjust"),
+				conf_w, conf_h,
 				win->csd_margin_w, win->csd_margin_h,
 				win->server->content_scale, win->server->prefer_csd);
+			win->fit_prev_w = win->fit_last_w;
+			win->fit_prev_h = win->fit_last_h;
+			win->fit_last_w = out_w;
+			win->fit_last_h = out_h;
+			win->fit_last_msec = now_msec;
 			resize_output_to(win, out_w, out_h);
 			if (win->last_client_conf_w != conf_w ||
 					win->last_client_conf_h != conf_h) {
@@ -213,11 +297,13 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			}
 		} else if (size_mismatch && win->size_from_wm) {
 			wlr_log(WLR_INFO, "size: hold host size (size_from_wm=1, "
+				"preferred %dx%d vs output %dx%d; client should follow "
+				"last_conf %dx%d)",
+				cw, ch, win->output->width, win->output->height,
+				win->last_client_conf_w, win->last_client_conf_h);
+		} else if (size_mismatch && tiled) {
+			wlr_log(WLR_INFO, "size: hold host size (tiled/max/fs, "
 				"preferred %dx%d vs output %dx%d)",
-				cw, ch, win->output->width, win->output->height);
-		} else if (size_mismatch && !grow) {
-			wlr_log(WLR_DEBUG, "size: ignore shrink preferred %dx%d "
-				"(host stays %dx%d; shrink is host-driven only)",
 				cw, ch, win->output->width, win->output->height);
 		}
 	}
