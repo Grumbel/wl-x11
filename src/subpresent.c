@@ -180,10 +180,14 @@ static bool subpresent_render_and_present(struct wlx_subpresent *sp) {
 	}
 
 	struct wlr_surface *surf = sp->surface;
+	/* Same rule as xdg_popup: keep scaled present size under --scale;
+	 * only match window to buffer when scale is 1. */
 	if (surf->buffer) {
 		int bw = surf->buffer->base.width;
 		int bh = surf->buffer->base.height;
-		if (bw > 0 && bh > 0 && (bw != width || bh != height)) {
+		bool scale_1 = server->content_scale <= 0.0 ||
+			server->content_scale == 1.0;
+		if (scale_1 && bw > 0 && bh > 0 && (bw != width || bh != height)) {
 			wlr_x11_present_window_configure(sp->xpresent,
 				root_x, root_y, bw, bh);
 			width = bw;

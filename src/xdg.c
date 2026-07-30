@@ -897,11 +897,17 @@ static bool popup_render_and_present(struct wlx_popup *pop) {
 	struct wlr_surface *surf = pop->xdg_popup && pop->xdg_popup->base
 		? pop->xdg_popup->base->surface : NULL;
 
-	/* Match present-window size to the client buffer (Present requires it). */
+	/* Direct Present only when the client buffer already matches the
+	 * present-window size. With --scale the window is logical*scale; the
+	 * client buffer is still logical — never configure the OR window down
+	 * to the buffer size (that clipped/misplaced menus). Composite and
+	 * stretch instead. */
 	if (surf && surf->buffer) {
 		int bw = surf->buffer->base.width;
 		int bh = surf->buffer->base.height;
-		if (bw > 0 && bh > 0 && (bw != width || bh != height)) {
+		bool scale_1 = server->content_scale <= 0.0 ||
+			server->content_scale == 1.0;
+		if (scale_1 && bw > 0 && bh > 0 && (bw != width || bh != height)) {
 			wlr_x11_present_window_configure(pop->xpresent,
 				root_x, root_y, bw, bh);
 			width = bw;
@@ -909,7 +915,6 @@ static bool popup_render_and_present(struct wlx_popup *pop) {
 			pop->root_w = bw;
 			pop->root_h = bh;
 		}
-		/* Direct Present of the client buffer (same path as toplevels). */
 		if (bw == width && bh == height) {
 			if (wlr_x11_present_window_present(pop->xpresent,
 					&surf->buffer->base)) {
