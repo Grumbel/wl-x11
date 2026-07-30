@@ -104,6 +104,13 @@ WAYLAND_DISPLAY=wayland-1 gtk4-demo
 Each client window that appears should show up as its own regular,
 decorated X11 window under your host window manager.
 
+## Size negotiation
+
+How each X11 window and its Wayland `xdg_toplevel` agree on size (pending
+self-configure in the X11 backend, grow-only preferred fit, `size_from_wm`
+policy) is documented in **[docs/SIZE.md](docs/SIZE.md)**, with references
+to ICCCM, EWMH, and xdg-shell.
+
 ## Scope / known limitations
 
 This is intentionally minimal, in the spirit of a "one file you can read

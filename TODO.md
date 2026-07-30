@@ -13,6 +13,9 @@ the X11 backend freely.
 
 ## Size negotiation (client ↔ host WM)
 
+Design write-up: [docs/SIZE.md](docs/SIZE.md).
+
+
 Loop (log evidence): client prefers 653 → `resize_output_to(653)` → X
 `ConfigureNotify 719` (seq *newer* than our configure — not caught by stale
 seq filter) → `request_state`/`size_from_wm` → `set_size(719)` → client still

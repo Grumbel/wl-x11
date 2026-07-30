@@ -165,6 +165,13 @@ placement (clipped) is used so the menu still appears.
 Retired approaches: parent-window expand; per-popup / shared OR `wlr_output`.
 See [TODO.md](TODO.md) for history and remaining integration checks.
 
+## Size negotiation
+
+Do not reintroduce compositor-side soft-ignore of ConfigureNotify or
+bidirectional preferred-size “fit”. Design and protocol mapping live in
+**[docs/SIZE.md](docs/SIZE.md)**. Update that document when changing size
+policy or backend pending-configure behaviour.
+
 ## When changing behavior
 
 - Prefer ICCCM/EWMH-correct behavior over compositor-side hacks.
