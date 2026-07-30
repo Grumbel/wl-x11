@@ -17,12 +17,15 @@ configure, ack, and buffer attach on stderr.
 | `grow` | Attach 640×480 (client-driven grow) |
 | `shrink` | Attach 320×200 (client-driven shrink) |
 | `oscillate` | Alternate 400×300 ↔ 900×700 every `--period-ms` (A↔B thrash) |
-| `undersize` | Attach half of last configure (letterbox bait) |
+| `restable` | Attach 500×350 so unmaximize does not restore a 64×64 leftover |
 | `follow` | Obey compositor configures |
 | `maximize` | `xdg_toplevel.set_maximized` |
-| `undersize_while_max` | Half-size buffers while maximized |
-| `unmaximize` | `unset_maximized` |
+| `undersize_while_max` | Half-size buffers while maximized (letterbox bait) |
+| `unmaximize` | `unset_maximized` (host should restore ~restable size) |
 | `done` | Exit (or restart with `--loop`) |
+
+Floating “undersize” is intentional omitted: under preferred-fit the host
+would shrink with the buffer, which is not the letterbox failure mode.
 
 ## Build / run
 

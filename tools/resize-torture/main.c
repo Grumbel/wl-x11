@@ -5,8 +5,11 @@
  * keep breaking nested X11 compositors (wl-x11 in particular).
  *
  * Phases (see phase_name[]):
- *   map → grow → shrink → oscillate → undersize → follow →
+ *   map → grow → shrink → oscillate → restable → follow →
  *   maximize → undersize_while_max → unmaximize → done
+ *
+ * Floating undersize is omitted: preferred-fit would shrink the host, so
+ * it does not test letterboxing. Letterbox is only exercised while max.
  *
  * Logs every configure, ack, buffer attach, and phase change on stderr.
  *
@@ -62,7 +65,9 @@ enum phase {
 	PH_GROW,
 	PH_SHRINK,
 	PH_OSCILLATE,
-	PH_UNDERSIZE,
+	/* After oscillation the host may still be at the large size (guard
+	 * blocked shrink). Restabilize to a known natural size before max. */
+	PH_RESTABLE,
 	PH_FOLLOW,
 	PH_MAXIMIZE,
 	PH_UNDERSIZE_MAX,
@@ -77,7 +82,7 @@ static const char *phase_name(enum phase p) {
 	case PH_GROW: return "grow";
 	case PH_SHRINK: return "shrink";
 	case PH_OSCILLATE: return "oscillate";
-	case PH_UNDERSIZE: return "undersize";
+	case PH_RESTABLE: return "restable";
 	case PH_FOLLOW: return "follow";
 	case PH_MAXIMIZE: return "maximize";
 	case PH_UNDERSIZE_MAX: return "undersize_while_max";
@@ -146,9 +151,14 @@ static void desired_size(int *w, int *h) {
 			*h = 700;
 		}
 		break;
-	case PH_UNDERSIZE:
+	case PH_RESTABLE:
+		/* Known size so unmaximize does not restore 64x64. */
+		*w = 500;
+		*h = 350;
+		break;
 	case PH_UNDERSIZE_MAX:
-		/* Deliberately smaller than the last configure. */
+		/* Deliberately smaller than the maximized configure (letterbox).
+		 * Only meaningful while host_authority holds the X window. */
 		*w = cw > 80 ? cw / 2 : 40;
 		*h = ch > 80 ? ch / 2 : 40;
 		if (*w < 64) {
@@ -163,9 +173,9 @@ static void desired_size(int *w, int *h) {
 	case PH_UNMAXIMIZE:
 	case PH_DONE:
 	default:
-		/* Obey configure; if 0, keep a modest natural size. */
-		*w = g.conf_w > 0 ? g.conf_w : 400;
-		*h = g.conf_h > 0 ? g.conf_h : 300;
+		/* Obey configure; if 0, modest natural size. */
+		*w = g.conf_w > 0 ? g.conf_w : 500;
+		*h = g.conf_h > 0 ? g.conf_h : 350;
 		break;
 	}
 }
@@ -213,7 +223,7 @@ static uint32_t phase_color(void) {
 	case PH_GROW: return 0xFF339966;
 	case PH_SHRINK: return 0xFF996633;
 	case PH_OSCILLATE: return 0xFF993366;
-	case PH_UNDERSIZE: return 0xFF663399;
+	case PH_RESTABLE: return 0xFF669966;
 	case PH_FOLLOW: return 0xFF669933;
 	case PH_MAXIMIZE: return 0xFF333399;
 	case PH_UNDERSIZE_MAX: return 0xFF993333;
@@ -254,11 +264,11 @@ static int phase_duration_ms(enum phase p) {
 	case PH_GROW: return 800;
 	case PH_SHRINK: return 800;
 	case PH_OSCILLATE: return 1500; /* many flips at period_ms */
-	case PH_UNDERSIZE: return 1200;
-	case PH_FOLLOW: return 800;
+	case PH_RESTABLE: return 900;
+	case PH_FOLLOW: return 600;
 	case PH_MAXIMIZE: return 1000;
 	case PH_UNDERSIZE_MAX: return 1500;
-	case PH_UNMAXIMIZE: return 1000;
+	case PH_UNMAXIMIZE: return 1200;
 	case PH_DONE: return 500;
 	default: return 500;
 	}
@@ -309,8 +319,8 @@ static void tick(void) {
 			log_msg("oscillate step %d", g.phase_step);
 			attach_desired();
 		}
-	} else if (g.phase == PH_UNDERSIZE || g.phase == PH_UNDERSIZE_MAX) {
-		/* Re-assert undersized buffer periodically. */
+	} else if (g.phase == PH_UNDERSIZE_MAX) {
+		/* Re-assert undersized buffer while maximized (letterbox bait). */
 		if (now - g.last_step_ms >= g.period_ms * 2) {
 			g.phase_step++;
 			g.last_step_ms = now;

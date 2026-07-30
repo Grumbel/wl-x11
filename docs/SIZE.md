@@ -213,7 +213,7 @@ and current geometry already match that size (±1px).
 
 Raw xdg-shell stress client (flake output `.#resize-torture`) cycles:
 
-map → grow → shrink → oscillate → undersize → follow →
+map → grow → shrink → oscillate → restable → follow →
 maximize → undersize_while_max → unmaximize → done
 
 ```bash
