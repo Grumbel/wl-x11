@@ -323,6 +323,8 @@ struct wlx_window {
 	int fit_last_w, fit_last_h;
 	int fit_prev_w, fit_prev_h;
 	int64_t fit_last_msec;
+	/* Rate-limit fill_host re-assert when last_conf already matches. */
+	int64_t fill_host_last_msec;
 	/* Skip scene Present after an output size change until the client
 	 * commits a new buffer, so the previous frame stays on screen. */
 	bool hold_present;
@@ -455,6 +457,8 @@ void win_sync_size_hints(struct wlx_window *win);
 void toplevel_preferred_size(struct wlx_window *win, int *w_out, int *h_out);
 /* set_size + record last_client_conf so surface_commit can detect client-driven resizes */
 void wlx_toplevel_set_size(struct wlx_window *win, int width, int height);
+void wlx_toplevel_size_for_output(struct wlx_window *win, int *width, int *height);
+void wlx_toplevel_fill_host(struct wlx_window *win, const char *reason);
 
 /* move_resize.c */
 void begin_interactive_move(struct wlx_window *win);

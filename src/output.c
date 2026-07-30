@@ -189,37 +189,8 @@ void output_commit(struct wl_listener *listener, void *data) {
 	wlr_log(WLR_INFO, "size: output_commit %dx%d → toplevel (size_from_wm=%d)",
 		w, h, (int)win->size_from_wm);
 	if (win->toplevel) {
-		/* Client sees logical window geometry; host may be larger by CSD
-		 * shadow margin. Maximized/fullscreen drop the shadow — never
-		 * subtract a stale margin or the client undersizes the X window
-		 * (empty right/bottom border). Host resize often races ahead of
-		 * _NET_WM_STATE; also treat size_from_wm + zero margins as tiled. */
-		int lw = wlx_unscale_size(win->server, w);
-		int lh = wlx_unscale_size(win->server, h);
-		bool tiled = win->toplevel->current.maximized ||
-			win->toplevel->pending.maximized ||
-			win->toplevel->current.fullscreen ||
-			win->toplevel->pending.fullscreen;
-		/* After maximize the property handler clears margins; a resize that
-		 * already ran with old margins is fixed by that handler re-sending
-		 * size. While margins are still non-zero, only skip subtract if the
-		 * xdg state already knows we are tiled. */
-		if (win->server->prefer_csd && !tiled &&
-				(win->csd_margin_w > 0 || win->csd_margin_h > 0)) {
-			lw -= win->csd_margin_w;
-			lh -= win->csd_margin_h;
-			if (lw < 1) {
-				lw = 1;
-			}
-			if (lh < 1) {
-				lh = 1;
-			}
-		}
-		wlr_log(WLR_INFO, "size: output_commit set_size %dx%d "
-			"(margin %dx%d, csd=%d)",
-			lw, lh, win->csd_margin_w, win->csd_margin_h,
-			win->server ? (int)win->server->prefer_csd : 0);
-		wlx_toplevel_set_size(win, lw, lh);
+		/* Host mode changed: client must fill the new content size. */
+		wlx_toplevel_fill_host(win, "output_commit");
 	}
 	/* Keep host WM constraints aligned with the new size / xdg min-max. */
 	win_sync_size_hints(win);
@@ -323,6 +294,99 @@ void wlx_toplevel_set_size(struct wlx_window *win, int width, int height) {
 		win->last_client_conf_w = width;
 		win->last_client_conf_h = height;
 	}
+}
+
+/* Logical size the Wayland client should use to fill the current host
+ * output mode. CSD shadow margins are subtracted only when not tiled so
+ * maximized/fullscreen clients fill the content window edge-to-edge. */
+void wlx_toplevel_size_for_output(struct wlx_window *win, int *width, int *height) {
+	if (!win || !win->output || !width || !height) {
+		if (width) {
+			*width = 0;
+		}
+		if (height) {
+			*height = 0;
+		}
+		return;
+	}
+	int lw = wlx_unscale_size(win->server, win->output->width);
+	int lh = wlx_unscale_size(win->server, win->output->height);
+	bool tiled = win->toplevel && (
+		win->toplevel->current.maximized ||
+		win->toplevel->pending.maximized ||
+		win->toplevel->current.fullscreen ||
+		win->toplevel->pending.fullscreen);
+	if (win->server && win->server->prefer_csd && !tiled &&
+			(win->csd_margin_w > 0 || win->csd_margin_h > 0)) {
+		lw -= win->csd_margin_w;
+		lh -= win->csd_margin_h;
+		if (lw < 1) {
+			lw = 1;
+		}
+		if (lh < 1) {
+			lh = 1;
+		}
+	}
+	*width = lw;
+	*height = lh;
+}
+
+/* Under host authority (max/fs or size_from_wm): configure the client to
+ * fill the host window. Re-sends when geometry lags last_conf or last_conf
+ * lags the host — otherwise a small buffer stays letterboxed forever. */
+void wlx_toplevel_fill_host(struct wlx_window *win, const char *reason) {
+	if (!win || !win->toplevel || !win->output) {
+		return;
+	}
+	int lw = 0, lh = 0;
+	wlx_toplevel_size_for_output(win, &lw, &lh);
+	if (lw < 1 || lh < 1) {
+		return;
+	}
+	struct wlr_box geo = win->toplevel->base->current.geometry;
+	int conf_w = (geo.width > 0) ? geo.width : 0;
+	int conf_h = (geo.height > 0) ? geo.height : 0;
+	int d_last_w = lw - win->last_client_conf_w;
+	int d_last_h = lh - win->last_client_conf_h;
+	if (d_last_w < 0) {
+		d_last_w = -d_last_w;
+	}
+	if (d_last_h < 0) {
+		d_last_h = -d_last_h;
+	}
+	int d_conf_w = lw - conf_w;
+	int d_conf_h = lh - conf_h;
+	if (d_conf_w < 0) {
+		d_conf_w = -d_conf_w;
+	}
+	if (d_conf_h < 0) {
+		d_conf_h = -d_conf_h;
+	}
+	bool last_ok = win->last_client_conf_w > 0 && win->last_client_conf_h > 0 &&
+		d_last_w <= 1 && d_last_h <= 1;
+	bool conf_ok = conf_w > 0 && conf_h > 0 && d_conf_w <= 1 && d_conf_h <= 1;
+	if (last_ok && conf_ok) {
+		return;
+	}
+	/* last_conf already matches host but geometry lags (client ignored
+	 * configure). Re-assert at most every 500ms to avoid configure spam. */
+	if (last_ok && !conf_ok) {
+		struct timespec now_ts;
+		clock_gettime(CLOCK_MONOTONIC, &now_ts);
+		int64_t now_msec = (int64_t)now_ts.tv_sec * 1000 +
+			now_ts.tv_nsec / 1000000;
+		if (win->fill_host_last_msec > 0 &&
+				now_msec - win->fill_host_last_msec < 500) {
+			return;
+		}
+		win->fill_host_last_msec = now_msec;
+	}
+	wlr_log(WLR_INFO, "size: fill_host %dx%d (reason=%s, last_conf=%dx%d, "
+		"conf=%dx%d, output=%dx%d)",
+		lw, lh, reason ? reason : "?",
+		win->last_client_conf_w, win->last_client_conf_h,
+		conf_w, conf_h, win->output->width, win->output->height);
+	wlx_toplevel_set_size(win, lw, lh);
 }
 
 

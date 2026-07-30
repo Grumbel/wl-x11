@@ -42,10 +42,11 @@ notify). Compositor keeps only policy (`size_from_wm` vs preferred size).
 - [x] Compositor: preferred fit is bidirectional when `!size_from_wm`, with
       an A→B→A oscillation guard (`WLX_FIT_OSCILLATION_MS`) so content-driven
       shrink/grow works while rapid maximize races do not.
-- [ ] Manual verify: one bounce max then hold; interactive WM resize still
-      updates client via set_size; initial map (size_from_wm=0) still grows
-      from placeholder; maximize/tile accepts host size; client preferred
-      shrink does not fight the host window.
+- [x] Host authority path calls `wlx_toplevel_fill_host` so a small client
+      buffer cannot stay letterboxed in a large host (maximize / focus loss).
+- [ ] Manual verify: map grow; content shrink/grow floating; interactive WM
+      resize; maximize fills; focus-loss while max; unmaximize restores
+      preferred-fit; no rapid thrash (see docs/SIZE.md §7).
 
 
 ## Explicitly out of scope (for now)

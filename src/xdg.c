@@ -295,16 +295,17 @@ void surface_commit(struct wl_listener *listener, void *data) {
 				wlr_scene_node_set_position(&win->scene_tree->node,
 					win->l_output->x, win->l_output->y);
 			}
-		} else if (size_mismatch && win->size_from_wm) {
-			wlr_log(WLR_INFO, "size: hold host size (size_from_wm=1, "
-				"preferred %dx%d vs output %dx%d; client should follow "
-				"last_conf %dx%d)",
-				cw, ch, win->output->width, win->output->height,
-				win->last_client_conf_w, win->last_client_conf_h);
-		} else if (size_mismatch && tiled) {
-			wlr_log(WLR_INFO, "size: hold host size (tiled/max/fs, "
-				"preferred %dx%d vs output %dx%d)",
-				cw, ch, win->output->width, win->output->height);
+		} else if (size_mismatch && (win->size_from_wm || tiled)) {
+			/* Host owns the X window size. Never shrink/grow from preferred.
+			 * Re-assert set_size so a small client buffer cannot stay
+			 * letterboxed in a large host (maximize, interactive resize,
+			 * focus-loss toolkit redraws that ignore the last configure). */
+			wlr_log(WLR_INFO, "size: host_authority hold output=%dx%d "
+				"(size_from_wm=%d tiled=%d preferred=%dx%d)",
+				win->output->width, win->output->height,
+				(int)win->size_from_wm, (int)tiled, cw, ch);
+			wlx_toplevel_fill_host(win,
+				tiled ? "host_authority_tiled" : "host_authority_wm");
 		}
 	}
 

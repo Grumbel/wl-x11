@@ -377,14 +377,10 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 		wlr_xdg_toplevel_set_fullscreen(win->toplevel, fullscreen);
 	}
 
-	/* Resize often arrives before this property notify. Re-send the current
-	 * host size without CSD margins so the client fills the maximized
-	 * window (avoids empty right/bottom border). */
-	if ((maximized || fullscreen) && win->output && win->output->width > 0 &&
-			win->output->height > 0) {
-		int lw = wlx_unscale_size(server, win->output->width);
-		int lh = wlx_unscale_size(server, win->output->height);
-		wlx_toplevel_set_size(win, lw, lh);
+	/* Resize often arrives before this property notify. Re-send host size
+	 * so the client fills the maximized/fullscreen content window. */
+	if ((maximized || fullscreen) && win->output) {
+		wlx_toplevel_fill_host(win, "net_wm_state");
 	}
 }
 
