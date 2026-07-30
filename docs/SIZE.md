@@ -37,6 +37,7 @@ Related: [AGENTS.md](../AGENTS.md) (placement), [TODO.md](../TODO.md).
 | **No origin on ConfigureNotify** | ICCCM: clients must track Notify, not assume ConfigureWindow stuck. Event has sequence + size only — no “who asked”. Self-ack must be done by the issuer (backend pending size). |
 | **Content vs frame** | Resize uses **`output->win`** (wlroots content window) only. Frame outer size must never feed `wlr_output` mode (historical runaway growth). |
 | **`size_from_wm` sticky** | Set on every external `request_state` and on maximize. Without **client_assert** clearing it when floating, content resize never moved the host again. |
+| **Unmaximize + stale buffer** | request_state restores e.g. 500×350 with size_from_wm; client may still commit maximized buffer. Grow client_assert must not clear size_from_wm or host jumps back to fullscreen. |
 | **Silent hold** | Under host authority, preferred mismatch only **logged**. Client could keep a small buffer; `last_conf` already matched host so nothing re-sent `set_size` → permanent letterbox. Focus-loss toolkit redraws trigger the same path while maximized. |
 | **Grow-only** | Fixed oscillation but broke intentional shrink. Wrong trade-off. |
 
@@ -162,8 +163,9 @@ Helpers: `wlr_x11_output_has_pending_configure()`,
 ### 4.3 Surface commit preferred-size policy (`src/xdg.c`)
 
 ```
-client_assert = mismatch && conf differs from last_conf && !tiled
-if client_assert && size_from_wm: clear size_from_wm
+client_assert_shrink = mismatch && conf differs && !tiled && preferred < host
+if client_assert_shrink && size_from_wm: clear size_from_wm
+# grow assert while size_from_wm: ignore (stale max buffer after unmaximize)
 
 host_authority = size_from_wm || tiled
 
@@ -188,7 +190,8 @@ and current geometry already match that size (±1px).
 | Map / floating preferred grow | Yes (fit) | set_size to preferred |
 | Floating preferred shrink | Yes (fit) | set_size to preferred |
 | Floating rapid A→B→A | No (oscillation) | unchanged |
-| client_assert while floating | Clears size_from_wm; then fit | as fit |
+| client_assert **shrink** while floating | Clears size_from_wm; then fit | as fit |
+| client_assert **grow** while size_from_wm | No (keep host; fill_host) | fill_host |
 | Host interactive resize | Yes (request_state) | fill_host |
 | Maximized / fullscreen | Only via WM | fill_host until geometry matches |
 | Preferred small while max | No | fill_host (re-assert) |

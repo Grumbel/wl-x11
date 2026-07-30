@@ -179,10 +179,13 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		}
 		bool size_mismatch = dw > 1 || dh > 1;
 		/* Client asserts a geometry we did not request (not merely acking
-		 * last_conf). That is intentional content-driven resize: release
-		 * size_from_wm so preferred fit can run. Host interactive resize
-		 * still wins until the client asserts; oscillation guard stops
-		 * rapid A→B→A after we follow. */
+		 * last_conf). Only a *shrink* assert releases size_from_wm so
+		 * content-driven smaller windows work after a host configure.
+		 * A *grow* assert must not: after unmaximize the WM restores e.g.
+		 * 500x350 (size_from_wm=1) while the client may still commit a
+		 * stale maximized buffer; treating that as client_assert grew the
+		 * host back to fullscreen (resize-torture log). Oscillation guard
+		 * still applies once size_from_wm is clear. */
 		int conf_dw = conf_w - win->last_client_conf_w;
 		int conf_dh = conf_h - win->last_client_conf_h;
 		if (conf_dw < 0) {
@@ -194,13 +197,24 @@ void surface_commit(struct wl_listener *listener, void *data) {
 		bool conf_differs = win->last_client_conf_w <= 0 ||
 			win->last_client_conf_h <= 0 ||
 			conf_dw > 1 || conf_dh > 1;
+		bool assert_shrink = size_mismatch && conf_differs && !tiled &&
+			(out_w < win->output->width - 1 ||
+			 out_h < win->output->height - 1);
 		bool client_assert = size_mismatch && conf_differs && !tiled;
-		if (client_assert && win->size_from_wm) {
-			wlr_log(WLR_INFO, "size: client_assert %dx%d "
-				"(last_conf %dx%d) → clear size_from_wm",
+		if (assert_shrink && win->size_from_wm) {
+			wlr_log(WLR_INFO, "size: client_assert shrink %dx%d "
+				"(last_conf %dx%d output %dx%d) → clear size_from_wm",
 				conf_w, conf_h,
-				win->last_client_conf_w, win->last_client_conf_h);
+				win->last_client_conf_w, win->last_client_conf_h,
+				win->output->width, win->output->height);
 			win->size_from_wm = false;
+		} else if (client_assert && win->size_from_wm &&
+				(out_w > win->output->width + 1 ||
+				 out_h > win->output->height + 1)) {
+			wlr_log(WLR_INFO, "size: client_assert grow ignored "
+				"(preferred %dx%d > output %dx%d, size_from_wm=1; "
+				"fill_host keeps host size)",
+				cw, ch, win->output->width, win->output->height);
 		}
 
 		/* Preferred-driven host fit when the host WM is not owning size.

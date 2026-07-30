@@ -168,9 +168,19 @@ static void desired_size(int *w, int *h) {
 			*h = 64;
 		}
 		break;
+	case PH_UNMAXIMIZE:
+		/* Prefer restable size so a stale maximized conf does not re-attach
+		 * a fullscreen buffer before the host ConfigureNotify arrives. */
+		if (g.conf_w > 0 && g.conf_h > 0 && g.conf_w < 1200 && g.conf_h < 900) {
+			*w = g.conf_w;
+			*h = g.conf_h;
+		} else {
+			*w = 500;
+			*h = 350;
+		}
+		break;
 	case PH_FOLLOW:
 	case PH_MAXIMIZE:
-	case PH_UNMAXIMIZE:
 	case PH_DONE:
 	default:
 		/* Obey configure; if 0, modest natural size. */
