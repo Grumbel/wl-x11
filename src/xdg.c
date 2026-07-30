@@ -190,8 +190,8 @@ void surface_commit(struct wl_listener *listener, void *data) {
 			win->last_client_conf_h <= 0 ||
 			conf_dw > 1 || conf_dh > 1;
 		/* Client asserts a new geometry (not merely acking last_conf): allow
-		 * fit even after a prior size_from_wm. Loop prevention is on the
-		 * request_state side (awaiting_configure after resize_output_to). */
+		 * fit even after a prior size_from_wm. Self-configure ack is handled
+		 * in the X11 backend (pending size); request_state is host-driven. */
 		bool client_assert = size_mismatch && conf_differs;
 		if (client_assert) {
 			win->size_from_wm = false;

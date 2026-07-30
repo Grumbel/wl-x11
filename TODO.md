@@ -18,13 +18,27 @@ Loop (log evidence): client prefers 653 → `resize_output_to(653)` → X
 seq filter) → `request_state`/`size_from_wm` → `set_size(719)` → client still
 prefers 653 → **client_driven cleared size_from_wm and fit again** → repeat.
 
+X11 `ConfigureNotify` has no origin/purpose field. Correlation belongs in the
+vendored X11 backend (it issues `ConfigureWindow` and sees the matching
+notify). Compositor keeps only policy (`size_from_wm` vs preferred size).
+
 - [x] Backend: ignore ConfigureNotify with seq < last ConfigureWindow
 - [x] Backend: ignore echo when size matches win_width/height
 - [x] Compositor: **do not** let client preferred size override `size_from_wm`
       (removed client_driven fit / clear). While size_from_wm, log
       `size: hold host size` instead of fighting.
+- [x] Backend: track **pending self-configure** (`pending_width/height` +
+      `has_pending_configure`) on `ConfigureWindow`; matching ConfigureNotify
+      is a self-ack (**no** `request_state`). External / WM-rewritten sizes
+      still emit `request_state` and clear pending.
+- [x] Backend public helpers: `wlr_x11_output_has_pending_configure()`,
+      `wlr_x11_output_get_pending_size()` (compositor debug / optional policy).
+- [x] Compositor: drop `awaiting_configure_*` soft-ignore / re-assert loop;
+      `request_state` that reaches us is treated as host geometry →
+      `size_from_wm` + commit.
 - [ ] Manual verify: one bounce max then hold; interactive WM resize still
-      updates client via set_size; initial map (size_from_wm=0) still fits.
+      updates client via set_size; initial map (size_from_wm=0) still fits;
+      maximize/tile while a client fit is in flight accepts host size.
 
 
 ## Explicitly out of scope (for now)

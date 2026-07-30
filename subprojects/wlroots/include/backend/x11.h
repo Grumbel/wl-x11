@@ -41,6 +41,12 @@ struct wlr_x11_output {
 	 * not undo that resize via request_state. */
 	uint16_t last_configure_seq;
 	bool has_configure_seq;
+	/* Outstanding self-configure: size we last asked for via
+	 * ConfigureWindow. Matching ConfigureNotify is a self-ack (no
+	 * request_state). Cleared on match or when an external size
+	 * supersedes the pending request. */
+	int32_t pending_width, pending_height;
+	bool has_pending_configure;
 
 	struct wlr_pointer pointer;
 

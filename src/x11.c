@@ -357,11 +357,6 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 			win->size_from_wm = true;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
-			/* Do not block the concurrent ConfigureNotify with a client-fit
-			 * wait (maximize is host-driven). */
-			win->awaiting_configure_w = 0;
-			win->awaiting_configure_h = 0;
-			win->awaiting_configure_ignores = 0;
 		} else {
 			/* Allow surface_commit to grow the host for restored CSD
 			 * shadows (otherwise buffer is clipped at right/bottom). */
@@ -376,9 +371,6 @@ static void win_handle_net_wm_state_notify(struct wlx_server *server,
 			win->size_from_wm = true;
 			win->csd_margin_w = 0;
 			win->csd_margin_h = 0;
-			win->awaiting_configure_w = 0;
-			win->awaiting_configure_h = 0;
-			win->awaiting_configure_ignores = 0;
 		} else {
 			win->size_from_wm = false;
 		}
@@ -542,117 +534,34 @@ void output_request_state(struct wl_listener *listener, void *data) {
 	int cur_w = win->output ? win->output->width : 0;
 	int cur_h = win->output ? win->output->height : 0;
 
+	bool pending = win->output && wlr_output_is_x11(win->output) &&
+		wlr_x11_output_has_pending_configure(win->output);
+	int32_t pend_w = 0, pend_h = 0;
+	if (pending) {
+		wlr_x11_output_get_pending_size(win->output, &pend_w, &pend_h);
+	}
+
 	wlr_log(WLR_INFO,
 		"size: request_state cur=%dx%d req=%dx%d have_mode=%d "
-		"size_from_wm=%d last_conf=%dx%d awaiting=%dx%d committed=0x%x",
+		"size_from_wm=%d last_conf=%dx%d pending=%dx%d committed=0x%x",
 		cur_w, cur_h, req_w, req_h, (int)have_mode,
 		(int)win->size_from_wm,
 		win->last_client_conf_w, win->last_client_conf_h,
-		win->awaiting_configure_w, win->awaiting_configure_h,
+		(int)pend_w, (int)pend_h,
 		event && event->state ? event->state->committed : 0);
 
-	/* Stale client-fit wait: output already has the size we asked for (the
-	 * confirming ConfigureNotify was filtered as an echo, or commit applied
-	 * the mode synchronously). Clear so a later host maximize is not stuck
-	 * behind a dead awaiting flag. */
-	if (win->awaiting_configure_w > 0 && cur_w > 0 &&
-			cur_w == win->awaiting_configure_w &&
-			cur_h == win->awaiting_configure_h) {
-		wlr_log(WLR_INFO, "size: clear stale awaiting %dx%d (matches current)",
-			cur_w, cur_h);
-		win->awaiting_configure_w = 0;
-		win->awaiting_configure_h = 0;
-		win->awaiting_configure_ignores = 0;
-	}
-
-	/* Confirmation of a compositor-initiated resize: apply if needed, do not
-	 * mark size_from_wm (host is following the client, not the other way). */
-	if (win->awaiting_configure_w > 0 && req_w > 0 &&
-			req_w == win->awaiting_configure_w &&
-			req_h == win->awaiting_configure_h) {
-		wlr_log(WLR_INFO, "size: request_state confirms client fit %dx%d",
-			req_w, req_h);
-		win->awaiting_configure_w = 0;
-		win->awaiting_configure_h = 0;
-		win->awaiting_configure_ignores = 0;
-		if (cur_w != req_w || cur_h != req_h) {
-			wlr_output_commit_state(win->output, event->state);
-		}
-		if (win->output) {
-			wlr_output_schedule_frame(win->output);
-		}
+	/* Backend filters self-ack (pending size match) and echoes. Anything
+	 * that still reaches us is external host geometry (WM resize, maximize,
+	 * tile, or rewrite of a client-fit ConfigureWindow). */
+	if (!have_mode || req_w <= 0 || req_h <= 0) {
 		return;
 	}
-
-	/* Other ConfigureNotify while a client fit is in flight.
-	 * Small mismatches are noise (border/scale); large jumps are host-
-	 * driven (maximize, tile, interactive WM resize) — accept those. */
-	if (win->awaiting_configure_w > 0 && req_w > 0) {
-		int adw = req_w - win->awaiting_configure_w;
-		int adh = req_h - win->awaiting_configure_h;
-		if (adw < 0) {
-			adw = -adw;
-		}
-		if (adh < 0) {
-			adh = -adh;
-		}
-		if (adw > 32 || adh > 32) {
-			wlr_log(WLR_INFO, "size: request_state %dx%d overrides awaiting "
-				"client fit %dx%d (host-driven Δ=%dx%d)",
-				req_w, req_h,
-				win->awaiting_configure_w, win->awaiting_configure_h,
-				adw, adh);
-			win->awaiting_configure_w = 0;
-			win->awaiting_configure_h = 0;
-			win->awaiting_configure_ignores = 0;
-			/* Fall through to genuine host size-change path. */
-		} else {
-			win->awaiting_configure_ignores++;
-			if (win->awaiting_configure_ignores <= 8) {
-				wlr_log(WLR_INFO, "size: request_state %dx%d ignored "
-					"(awaiting client fit %dx%d, ignore %d/8)",
-					req_w, req_h,
-					win->awaiting_configure_w, win->awaiting_configure_h,
-					win->awaiting_configure_ignores);
-				/* Re-assert desired size on first small conflict so the host
-				 * WM does not leave the X window at a slightly wrong size. */
-				if (win->awaiting_configure_ignores == 1 && win->output &&
-						wlr_output_is_x11(win->output) && win->server->xcb) {
-					xcb_window_t xw = wlr_x11_output_get_window(win->output);
-					if (xw != XCB_WINDOW_NONE) {
-						const uint32_t vals[] = {
-							(uint32_t)win->awaiting_configure_w,
-							(uint32_t)win->awaiting_configure_h,
-						};
-						xcb_configure_window(win->server->xcb, xw,
-							XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-							vals);
-						xcb_flush(win->server->xcb);
-						wlr_log(WLR_INFO, "size: re-assert ConfigureWindow %dx%d "
-							"on 0x%x",
-							win->awaiting_configure_w,
-							win->awaiting_configure_h, xw);
-					}
-				}
-				return;
-			}
-			wlr_log(WLR_INFO, "size: request_state %dx%d accepted after "
-				"awaiting client fit %dx%d timed out",
-				req_w, req_h,
-				win->awaiting_configure_w, win->awaiting_configure_h);
-			win->awaiting_configure_w = 0;
-			win->awaiting_configure_h = 0;
-			win->awaiting_configure_ignores = 0;
-		}
-	}
-
-	if (req_w > 0 && req_h > 0 && req_w == cur_w && req_h == cur_h) {
+	if (req_w == cur_w && req_h == cur_h) {
 		wlr_log(WLR_DEBUG, "size: request_state %dx%d matches current (noop)",
 			req_w, req_h);
 		return;
 	}
 
-	/* Genuine host/WM size change. */
 	win->size_from_wm = true;
 	win_handle_net_wm_state_notify(win->server, win);
 	wlr_output_commit_state(win->output, event->state);

@@ -69,6 +69,19 @@ void wlr_x11_output_set_title(struct wlr_output *output, const char *title);
 xcb_window_t wlr_x11_output_get_window(struct wlr_output *output);
 
 /**
+ * True if a ConfigureWindow we issued has not yet been acked by a matching
+ * ConfigureNotify (or superseded by an external size). Rootless compositors
+ * can use this instead of tracking awaiting sizes themselves.
+ */
+bool wlr_x11_output_has_pending_configure(struct wlr_output *output);
+
+/**
+ * Size of the outstanding self-configure, or 0×0 if none pending.
+ */
+void wlr_x11_output_get_pending_size(struct wlr_output *output,
+	int32_t *width, int32_t *height);
+
+/**
  * Return the XCB connection used by an X11 backend, or NULL if the backend is
  * not an X11 backend.
  */

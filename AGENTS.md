@@ -49,9 +49,12 @@ Important local changes:
   set `WM_NORMAL_HINTS` (compositor owns hints via `win_sync_size_hints`)
 - In `output_commit`, apply `MODE` **before** `MapWindow` so MapRequest sees
   the real client size (needed for mouse/center placement)
-- Public helpers `wlr_x11_output_get_window()` and
-  `wlr_x11_backend_get_connection()` so the compositor does not scan the
-  root window's children to find the backing X id
+- Pending self-configure (`pending_width/height`): matching ConfigureNotify
+  is acked without `request_state`; external sizes still notify the compositor
+- Public helpers `wlr_x11_output_get_window()`,
+  `wlr_x11_backend_get_connection()`, `wlr_x11_output_has_pending_configure()`,
+  `wlr_x11_output_get_pending_size()` so the compositor does not scan the
+  root window's children or invent awaiting-size heuristics
 - `wlr_x11_present_window_*` API for rootless OR menus (Present/DRI3
   without `wlr_output` / seat devices)
 

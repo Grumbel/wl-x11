@@ -64,7 +64,8 @@ static bool output_set_custom_mode(struct wlr_output *wlr_output,
 	struct wlr_x11_output *output = get_x11_output_from_output(wlr_output);
 	struct wlr_x11_backend *x11 = output->x11;
 
-	if (width == output->win_width && height == output->win_height) {
+	if (width == output->win_width && height == output->win_height &&
+			!output->has_pending_configure) {
 		return true;
 	}
 
@@ -76,6 +77,11 @@ static bool output_set_custom_mode(struct wlr_output *wlr_output,
 		XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
 	output->last_configure_seq = cookie.sequence;
 	output->has_configure_seq = true;
+	/* Remember what we asked for so ConfigureNotify can self-ack without
+	 * emitting request_state (host WM rewrites still look external). */
+	output->pending_width = width;
+	output->pending_height = height;
+	output->has_pending_configure = true;
 	xcb_flush(x11->xcb);
 
 	output->win_width = width;
@@ -768,22 +774,46 @@ void handle_x11_configure_notify(struct wlr_x11_output *output,
 		}
 	}
 
-	/* Echo of our own ConfigureWindow: size already applied in
-	 * output_set_custom_mode / commit — do not re-enter request_state. */
+	/* Self-ack: ConfigureNotify matches the size we asked for. Do not emit
+	 * request_state — the host is following our ConfigureWindow, not driving
+	 * a new size policy. */
+	if (output->has_pending_configure &&
+			ev->width == output->pending_width &&
+			ev->height == output->pending_height) {
+		wlr_log(WLR_DEBUG, "x11: ConfigureNotify %dx%d acks pending "
+			"(self, no request_state)", ev->width, ev->height);
+		output->has_pending_configure = false;
+		output->pending_width = 0;
+		output->pending_height = 0;
+		return;
+	}
+
+	/* Echo of current claimed size (after pending was already cleared, or
+	 * duplicate notify). */
 	if (ev->width == output->win_width && ev->height == output->win_height) {
 		wlr_log(WLR_DEBUG, "x11: ConfigureNotify %dx%d matches win size "
 			"(echo, no request_state)", ev->width, ev->height);
 		return;
 	}
 
-	wlr_log(WLR_INFO, "x11: ConfigureNotify %dx%d (was %dx%d) → request_state",
-		ev->width, ev->height, output->win_width, output->win_height);
+	/* External geometry (host WM resize/maximize/tile, or rewrite of our
+	 * pending request to a different size). Pending is superseded. */
+	if (output->has_pending_configure) {
+		wlr_log(WLR_INFO, "x11: ConfigureNotify %dx%d supersedes pending "
+			"%dx%d → request_state",
+			ev->width, ev->height,
+			output->pending_width, output->pending_height);
+		output->has_pending_configure = false;
+		output->pending_width = 0;
+		output->pending_height = 0;
+	} else {
+		wlr_log(WLR_INFO, "x11: ConfigureNotify %dx%d (was %dx%d) → request_state",
+			ev->width, ev->height, output->win_width, output->win_height);
+	}
 
-	/* Do not update win_width/height here. The compositor may ignore this
-	 * request_state (e.g. while awaiting a client-driven fit). Optimistic
-	 * updates left the backend believing the rejected size while wlr_output
-	 * kept the client size. win_* is updated in output_set_custom_mode when
-	 * a mode is actually committed. */
+	/* Do not update win_width/height here. The compositor may reject this
+	 * request_state. win_* is updated in output_set_custom_mode when a mode
+	 * is actually committed. */
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_custom_mode(&state, ev->width, ev->height, 0);
@@ -817,6 +847,32 @@ xcb_window_t wlr_x11_output_get_window(struct wlr_output *output) {
 	}
 	struct wlr_x11_output *x11_output = get_x11_output_from_output(output);
 	return x11_output->win;
+}
+
+bool wlr_x11_output_has_pending_configure(struct wlr_output *output) {
+	if (!wlr_output_is_x11(output)) {
+		return false;
+	}
+	struct wlr_x11_output *x11_output = get_x11_output_from_output(output);
+	return x11_output->has_pending_configure;
+}
+
+void wlr_x11_output_get_pending_size(struct wlr_output *output,
+		int32_t *width, int32_t *height) {
+	int32_t w = 0, h = 0;
+	if (wlr_output_is_x11(output)) {
+		struct wlr_x11_output *x11_output = get_x11_output_from_output(output);
+		if (x11_output->has_pending_configure) {
+			w = x11_output->pending_width;
+			h = x11_output->pending_height;
+		}
+	}
+	if (width) {
+		*width = w;
+	}
+	if (height) {
+		*height = h;
+	}
 }
 
 xcb_connection_t *wlr_x11_backend_get_connection(struct wlr_backend *backend) {
